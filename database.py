@@ -184,6 +184,10 @@ class Database:
             rows = sorted(self._users.items(), key=lambda kv: kv[1]["balance"], reverse=True)[:n]
             return [(uid, u["username"], u["balance"]) for uid, u in rows]
 
+    def top_users(self, n: int = 10):
+        """Alias for web route compatibility"""
+        return self.top(n)
+
     def rank(self, uid):
         uid = str(uid)
         with self._lock:
