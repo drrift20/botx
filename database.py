@@ -1,10 +1,7 @@
 """
-Ultra-light JSON-backed store.
-
-- Everything lives in one in-memory dict (a few KB even with hundreds of users).
-- Disk is touched only by a debounced, atomic flush (tmp file + os.replace),
-  so a crash mid-write can never corrupt the data file.
-- One RLock guards all access, so the FastAPI thread and the bot thread are safe.
+Ultra-light JSON-backed store for Instagram Economy Bot.
+- Thread-safe RLock protection.
+- Debounced atomic flush.
 """
 import json
 import logging
@@ -15,15 +12,15 @@ import time
 log = logging.getLogger("botx.db")
 
 DB_PATH = os.environ.get("DB_PATH", "data.json")
-FLUSH_INTERVAL = 15          # seconds between disk writes (only if something changed)
+FLUSH_INTERVAL = 15
 START_BALANCE = 500
-MAX_BALANCE = 10 ** 12       # sanity cap
+MAX_BALANCE = 10 ** 12
 
 DAILY_COOLDOWN = 24 * 3600
-STREAK_WINDOW = 48 * 3600    # claim again within 48h to keep your streak
+STREAK_WINDOW = 48 * 3600
 DAILY_BASE = 500
-STREAK_STEP = 50             # +50 per streak day
-STREAK_CAP = 10              # bonus maxes out at +500
+STREAK_STEP = 50
+STREAK_CAP = 10
 
 
 class Database:
@@ -37,7 +34,6 @@ class Database:
         self._load()
         threading.Thread(target=self._flush_loop, daemon=True, name="db-flush").start()
 
-    # ---------- persistence ----------
     def _load(self):
         try:
             with open(self.path, "r", encoding="utf-8") as f:
@@ -48,7 +44,7 @@ class Database:
         except FileNotFoundError:
             log.info("No data file yet, starting fresh.")
         except (json.JSONDecodeError, OSError) as e:
-            log.error("Data file unreadable (%s); keeping a backup and starting fresh.", e)
+            log.error("Data file unreadable (%s); keeping backup and starting fresh.", e)
             try:
                 os.replace(self.path, self.path + ".corrupt")
             except OSError:
@@ -63,7 +59,8 @@ class Database:
                 self._dirty = False
             try:
                 folder = os.path.dirname(os.path.abspath(self.path))
-                os.makedirs(folder, exist_ok=True)
+                if folder:
+                    os.makedirs(folder, exist_ok=True)
                 tmp = self.path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
                     f.write(payload)
@@ -83,18 +80,21 @@ class Database:
         self._stop.set()
         self.flush()
 
-    # ---------- internals ----------
     def _get(self, uid: str, username: str | None = None) -> dict:
-        """Get-or-create. Caller must hold the lock."""
         uid = str(uid)
         u = self._users.get(uid)
         if u is None:
             u = {
                 "username": username or f"user{uid[-4:]}",
                 "balance": START_BALANCE,
+                "bank": 0,
+                "debt": 0,
+                "inventory": {},
                 "last_daily": 0.0,
-                "streak": 0,
+                "last_work": 0.0,
+                "last_crime": 0.0,
                 "last_rob": 0.0,
+                "streak": 0,
                 "wins": 0,
                 "losses": 0,
                 "rob_ok": 0,
@@ -107,9 +107,7 @@ class Database:
             self._dirty = True
         return u
 
-    # ---------- public API ----------
     def get_user(self, uid, username: str | None = None) -> dict:
-        """Returns a snapshot copy (safe to read without the lock)."""
         with self._lock:
             return dict(self._get(uid, username))
 
@@ -143,7 +141,6 @@ class Database:
             return {"ok": True, "amount": amount, "streak": u["streak"], "balance": u["balance"]}
 
     def settle_bet(self, uid, bet: int, returned: int):
-        """Take `bet`, pay back `returned`. Returns (ok, new_balance)."""
         with self._lock:
             u = self._get(uid)
             if bet <= 0 or bet > u["balance"]:
@@ -157,7 +154,6 @@ class Database:
             return True, u["balance"]
 
     def transfer(self, src, dst, amount: int) -> int:
-        """Moves up to `amount` coins from src to dst. Returns what actually moved."""
         with self._lock:
             a, b = self._get(src), self._get(dst)
             amt = max(0, min(int(amount), a["balance"]))
@@ -185,7 +181,6 @@ class Database:
             return [(uid, u["username"], u["balance"]) for uid, u in rows]
 
     def top_users(self, n: int = 10):
-        """Alias for web route compatibility"""
         return self.top(n)
 
     def rank(self, uid):
