@@ -13,9 +13,9 @@ SESSION_FILE = "session.json"
 class InstagramBot:
     def __init__(self):
         self.cl = Client()
-        # Checks THREAD_ID first, then falls back to INSTA_THREAD_ID
         self.thread_id = os.environ.get("THREAD_ID") or os.environ.get("INSTA_THREAD_ID")
         self.commands = {}
+        self.bot_user_id = None
 
     def command(self, name):
         def decorator(func):
@@ -34,7 +34,6 @@ class InstagramBot:
         password = os.environ.get("INSTA_PASSWORD")
         session_data = os.environ.get("SESSION_DATA")
         
-        # Handle SESSION_DATA env variable if provided
         if session_data and not os.path.exists(SESSION_FILE):
             try:
                 with open(SESSION_FILE, "w", encoding="utf-8") as f:
@@ -49,6 +48,7 @@ class InstagramBot:
                 if username and password:
                     self.cl.login(username, password)
                 log.info("Logged in using session file.")
+                self.bot_user_id = str(self.cl.user_id)
                 return
             except Exception as e:
                 log.warning("Session load failed (%s), logging in fresh...", e)
@@ -57,6 +57,7 @@ class InstagramBot:
             self.cl.login(username, password)
             self.cl.dump_settings(SESSION_FILE)
             log.info("Logged in with username/password and saved session.")
+            self.bot_user_id = str(self.cl.user_id)
         else:
             raise ValueError("Both INSTA_USERNAME and INSTA_PASSWORD (or valid session) must be provided.")
 
@@ -64,15 +65,13 @@ class InstagramBot:
         log.info("Starting bot poll loop for thread %s", self.thread_id)
         seen_messages = set()
         
-        # --- FIX: Mark existing recent messages as seen on startup to avoid spamming old history ---
         try:
             init_thread = self.cl.direct_thread(self.thread_id)
-            for msg in init_thread.messages[:20]:
+            for msg in init_thread.messages[:25]:
                 seen_messages.add(msg.id)
             log.info("Initialized seen_messages with %d existing messages.", len(seen_messages))
         except Exception as e:
             log.warning("Could not pre-fill seen_messages: %s", e)
-        # ------------------------------------------------------------------------------------------
 
         while True:
             try:
@@ -83,6 +82,10 @@ class InstagramBot:
                     seen_messages.add(msg.id)
                     if len(seen_messages) > 300:
                         seen_messages.pop()
+
+                    # Ignore bot's own messages
+                    if str(msg.user_id) == str(self.bot_user_id):
+                        continue
 
                     text = msg.text
                     if text and text.startswith("!"):
@@ -255,7 +258,6 @@ def cmd_rob(message, target=""):
         t = database_inst._get(target_uid)
         u["last_rob"] = time.time()
         
-        # 40% success rate to rob
         if random.random() < 0.40:
             stolen = random.randint(30, min(300, t["balance"]))
             t["balance"] -= stolen
