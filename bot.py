@@ -13,6 +13,7 @@ SESSION_FILE = "session.json"
 class InstagramBot:
     def __init__(self):
         self.cl = Client()
+        # Checks THREAD_ID first, then falls back to INSTA_THREAD_ID
         self.thread_id = os.environ.get("THREAD_ID") or os.environ.get("INSTA_THREAD_ID")
         self.commands = {}
 
@@ -33,6 +34,7 @@ class InstagramBot:
         password = os.environ.get("INSTA_PASSWORD")
         session_data = os.environ.get("SESSION_DATA")
         
+        # Handle SESSION_DATA env variable if provided
         if session_data and not os.path.exists(SESSION_FILE):
             try:
                 with open(SESSION_FILE, "w", encoding="utf-8") as f:
@@ -61,6 +63,17 @@ class InstagramBot:
     def poll_loop(self):
         log.info("Starting bot poll loop for thread %s", self.thread_id)
         seen_messages = set()
+        
+        # --- FIX: Mark existing recent messages as seen on startup to avoid spamming old history ---
+        try:
+            init_thread = self.cl.direct_thread(self.thread_id)
+            for msg in init_thread.messages[:20]:
+                seen_messages.add(msg.id)
+            log.info("Initialized seen_messages with %d existing messages.", len(seen_messages))
+        except Exception as e:
+            log.warning("Could not pre-fill seen_messages: %s", e)
+        # ------------------------------------------------------------------------------------------
+
         while True:
             try:
                 thread = self.cl.direct_thread(self.thread_id)
@@ -126,7 +139,7 @@ def cmd_help(message):
                       "- `!shop` - View Potions, Police Shields & Jackpot Pills\n"
                       "- `!buy <item>` - Buy black market gear\n\n"
                       "🎲 **Gambling & Fun:**\n"
-                      "- `!coinflip <amt/all> <heads/tails>` - Double or nothing!\n"
+                      "- `!coinflip <amt/all/half> <heads/tails>` - Double or nothing!\n"
                       "- `!roll` - Roll 1-100\n"
                       "- `!ping` - Status check")
 
