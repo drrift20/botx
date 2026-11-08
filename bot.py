@@ -34,7 +34,7 @@ class InstaClient:
         return str(self.cl.user_id)
 
     def login(self):
-        """Log in using the generated session.json file from SESSION_DATA (no password challenge)."""
+        """Log in using the generated session.json file from SESSION_DATA (avoids 403 timeline errors)."""
         with self._lock:
             cl = self.cl
             session_file = config.BASE_DIR / "session.json"
@@ -42,9 +42,8 @@ class InstaClient:
             if session_file.exists():
                 try:
                     cl.load_settings(str(session_file))
-                    cl.login(config.USERNAME, config.PASSWORD)
-                    cl.get_timeline_feed()  # verifies session validity
-                    log.info("Successfully logged in using session.json!")
+                    user_info = cl.account_info()  # safely verifies session validity
+                    log.info("Successfully logged in as @%s using session.json!", user_info.username)
                     return
                 except Exception as e:
                     log.warning("session.json load failed (%s); trying fallback...", e)
@@ -54,8 +53,7 @@ class InstaClient:
             if raw:
                 try:
                     cl.set_settings(json.loads(raw))
-                    cl.login(config.USERNAME, config.PASSWORD)
-                    cl.get_timeline_feed()
+                    cl.account_info()
                     log.info("Logged in using MongoDB saved session")
                     return
                 except Exception as e:
