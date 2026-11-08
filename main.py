@@ -1,9 +1,10 @@
 """Entry point. Locally:  python main.py
-On Render:  Start Command = python main.py   (Render injects PORT)
+On Render:  Start Command = python main.py    (Render injects PORT)
 Run ONE instance only: each process starts its own Instagram listener."""
 import asyncio
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -19,21 +20,25 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("main")
 
+_stop = threading.Event()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await asyncio.to_thread(db.init_db)  # connects to MongoDB, creates indexes/seed data
-    stop = asyncio.Event()
-    task = asyncio.create_task(run_bot(stop))
-    log.info("Startup complete")
+    # Start the bot in a background daemon thread (compatible with Database sync methods)
+    t = threading.Thread(target=run_bot, args=(_stop,), daemon=True, name="ig-bot")
+    t.start()
+    log.info("Startup complete - Bot thread started.")
     yield
-    stop.set()
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+    _stop.set()
+    db.db.close() if hasattr(db, "db") else None
 
 
 app = FastAPI(title="GC Economy Bot", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=str(config.BASE_DIR / "static")), name="static")
+# Make sure static directory exists or skip mounting if not needed
+static_dir = config.BASE_DIR / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
 app.include_router(router)
 
 if __name__ == "__main__":
