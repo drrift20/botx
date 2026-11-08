@@ -100,7 +100,6 @@ class InstagramBot:
                             mock_msg = MockMessage(MockUser(user_pk, uname), text, args)
                             try:
                                 func = self.commands[cmd]
-                                # Check function signature or call with args/kwargs
                                 func(mock_msg, *args) if args else func(mock_msg)
                             except Exception as e:
                                 log.error("Error executing command %s: %s", cmd, e)
@@ -111,6 +110,14 @@ class InstagramBot:
 bot = InstagramBot()
 
 # --- REGISTER ALL COMMANDS ---
+
+@bot.command("help")
+def cmd_help(message):
+    bot.reply(message, "📜 **BOT COMMANDS LIST**\n- `!daily` - Claim daily coin bonus\n- `!work` - Work at a job to earn coins\n- `!crime` - Commit a crime (High risk/reward)\n- `!bank` - Manage your bank vault, deposits & loans\n- `!shop` - View the black market shop\n- `!buy potion` - Buy a Luck Potion\n- `!coinflip <amt>` - Flip a coin to double your coins\n- `!roll` - Roll a random number (1-100)\n- `!ping` - Check if the bot is alive")
+
+@bot.command("ping")
+def cmd_ping(message):
+    bot.reply(message, "pong! 🏓 Bot is active and running smoothly on Render.")
 
 @bot.command("daily")
 def cmd_daily(message):
@@ -273,6 +280,42 @@ def cmd_buy(message, item_name=""):
             database_inst._dirty = True
             
         bot.reply(message, f"🧪 You purchased a **Luck Potion**! Total potions: {u['inventory']['luck_potion']}. Use it wisely on your next crime or gamble!")
+
+@bot.command("coinflip")
+def cmd_coinflip(message, bet=0, choice="heads"):
+    uid = str(message.user.pk)
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    user = database_inst.get_user(uid, message.user.username)
+    
+    try:
+        bet = int(bet)
+    except (TypeError, ValueError):
+        bet = 0
+
+    if bet <= 0 or bet > user["balance"]:
+        return bot.reply(message, "❌ Invalid bet amount! Usage: `!coinflip <amount> <heads/tails>`")
+    
+    choice = choice.lower()
+    if choice not in ["heads", "tails"]:
+        choice = "heads"
+
+    outcome = random.choice(["heads", "tails"])
+    
+    with database_inst._lock:
+        u = database_inst._get(uid)
+        if outcome == choice:
+            u["balance"] += bet
+            database_inst._dirty = True
+            bot.reply(message, f"🪙 Coin landed on **{outcome.upper()}**! You won **+{bet} coins**! 🎉 (Balance: {u['balance']})")
+        else:
+            u["balance"] -= bet
+            database_inst._dirty = True
+            bot.reply(message, f"🪙 Coin landed on **{outcome.upper()}**! You lost **-{bet} coins**! 💀 (Balance: {u['balance']})")
+
+@bot.command("roll")
+def cmd_roll(message):
+    val = random.randint(1, 100)
+    bot.reply(message, f"🎲 You rolled a **{val}** out of 100!")
 
 def run_bot(*args, **kwargs):
     bot.login()
