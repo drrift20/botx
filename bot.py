@@ -1,21 +1,22 @@
-"""Instagram listener. instagrapi is synchronous, so every API call runs in a worker
-thread via asyncio.to_thread; a lock serialises them (the client isn't thread-safe)."""
-import asyncio
+import os
 import json
-import logging
-import random
-import threading
 import time
+import logging
+import threading
+import asyncio
+import random
 from collections import deque
-
-import requests
+from pathlib import Path
 from instagrapi import Client
-from instagrapi.exceptions import (ChallengeRequired, ClientConnectionError,
-                                   LoginRequired, PleaseWaitFewMinutes, RateLimitError)
-
+from instagrapi.exceptions import (
+    ChallengeRequired,
+    LoginRequired,
+    PleaseWaitFewMinutes,
+    RateLimitError,
+    ClientConnectionError
+)
 import config
 import database as db
-import game
 
 log = logging.getLogger("bot")
 
@@ -33,28 +34,34 @@ class InstaClient:
         return str(self.cl.user_id)
 
     def login(self):
-        """Log in, reusing the session stored in MongoDB (Render's disk is ephemeral,
-        so a session.json file would be lost on every deploy/restart)."""
+        """Log in using the generated session.json file from SESSION_DATA (no password challenge)."""
         with self._lock:
             cl = self.cl
+            session_file = config.BASE_DIR / "session.json"
+            
+            if session_file.exists():
+                try:
+                    cl.load_settings(str(session_file))
+                    cl.login(config.USERNAME, config.PASSWORD)
+                    cl.get_timeline_feed()  # verifies session validity
+                    log.info("Successfully logged in using session.json!")
+                    return
+                except Exception as e:
+                    log.warning("session.json load failed (%s); trying fallback...", e)
+            
+            # Fallback if session.json doesn't exist
             raw = db.get_state("ig_session")
             if raw:
                 try:
                     cl.set_settings(json.loads(raw))
                     cl.login(config.USERNAME, config.PASSWORD)
-                    cl.get_timeline_feed()  # verifies the session is still valid
-                    log.info("Logged in using saved session")
+                    cl.get_timeline_feed()
+                    log.info("Logged in using MongoDB saved session")
                     return
-                except LoginRequired:
-                    log.warning("Saved session expired; logging in fresh")
-                    old = cl.get_settings()
-                    cl.set_settings({})
-                    cl.set_uuids(old["uuids"])  # keep device identity
                 except Exception as e:
-                    log.warning("Session login failed (%s); logging in fresh", e)
-            cl.login(config.USERNAME, config.PASSWORD)
-            db.set_state("ig_session", json.dumps(cl.get_settings()))
-            log.info("Logged in with password; session saved to MongoDB")
+                    log.warning("MongoDB session login failed (%s)", e)
+            
+            raise Exception("No valid session found! Please provide a valid session.json via SESSION_DATA.")
 
     def fetch(self):
         with self._lock:
@@ -62,16 +69,6 @@ class InstaClient:
             for u in thread.users:
                 self._names[str(u.pk)] = u.username
             return thread.messages
-
-    def username_for(self, uid):
-        uid = str(uid)
-        if uid not in self._names:
-            with self._lock:
-                try:
-                    self._names[uid] = self.cl.username_from_user_id(int(uid))
-                except Exception:
-                    self._names[uid] = f"user{uid[-4:]}"
-        return self._names[uid]
 
     def send(self, text):
         with self._lock:
@@ -121,55 +118,66 @@ async def run_bot(stop: asyncio.Event):
     ts_raw = await asyncio.to_thread(db.get_state, "last_ts")
     last_ts = float(ts_raw) if ts_raw else None
 
-    async def say(text):
-        async with send_lock:
-            for attempt in range(3):
-                try:
-                    await asyncio.to_thread(ig.send, text)
-                    break
-                except (PleaseWaitFewMinutes, RateLimitError):
-                    await _sleep(stop, 60 * (attempt + 1))
-                except Exception as e:
-                    log.warning("Send failed (%s), attempt %d", e, attempt + 1)
-                    await _sleep(stop, 3 * (attempt + 1))
-            await asyncio.sleep(config.SEND_DELAY)
+    log.info("Bot loop started. Polling group thread %s", ig.thread_id)
 
-    fails = 0
-    log.info("Bot is listening on thread %s", config.THREAD_ID)
     while not stop.is_set():
         try:
-            msgs = sorted(await asyncio.to_thread(ig.fetch), key=lambda m: m.timestamp)
+            messages = await asyncio.to_thread(ig.fetch)
+            if not messages:
+                await _sleep(stop, random.uniform(config.POLL_MIN, config.POLL_MAX))
+                continue
 
-            if last_ts is None:  # first ever run: skip history instead of replaying it
-                last_ts = msgs[-1].timestamp.timestamp() if msgs else time.time()
-                seen.extend(m.id for m in msgs)
-                await asyncio.to_thread(db.set_state, "last_ts", last_ts)
-                msgs = []
-
-            for m in msgs:
-                ts = m.timestamp.timestamp()
-                if m.id in seen or ts < last_ts:
+            new_msgs = []
+            for m in reversed(messages):
+                m_id = str(m.id)
+                if m_id in seen:
                     continue
-                seen.append(m.id)
-                last_ts, last_id = max(last_ts, ts), m.id
-                if m.user_id is None or str(m.user_id) == ig.own_id or not m.text:
+                seen.append(m_id)
+                last_id = m_id
+                if last_ts and m.timestamp.timestamp() <= last_ts:
+                    continue
+                last_ts = m.timestamp.timestamp()
+                new_msgs.append(m)
+
+            for m in new_msgs:
+                text = (m.text or "").strip()
+                sender_id = str(m.user_id)
+                username = ig._names.get(sender_id, "unknown")
+
+                if sender_id == ig.own_id:
                     continue
 
-                uid = str(m.user_id)
-                if m.text.startswith(game.PREFIX):  # per-user anti-spam
-                    now = time.monotonic()
-                    if now - last_cmd.get(uid, 0) < config.USER_CMD_COOLDOWN:
-                        continue
-                    last_cmd[uid] = now
-
-                name = await asyncio.to_thread(ig.username_for, uid)
-                try:
-                    replies = await asyncio.to_thread(game.process, uid, name, m.text)
-                except Exception:
-                    log.exception("Command failed: %r", m.text)
+                if not text.startswith("!"):
                     continue
-                for r in replies:
-                    await say(r)
+
+                parts = text.split()
+                cmd = parts[0].lower()
+                args = parts[1:]
+
+                now = time.time()
+                cooldown = last_cmd.get(sender_id, 0) + config.USER_CMD_COOLDOWN
+                if now < cooldown and sender_id != ig.own_id:
+                    continue
+                last_cmd[sender_id] = now
+
+                r = None
+                if cmd == "!ping":
+                    r = f"Pong! @{username}"
+                elif cmd == "!help":
+                    r = "Available commands: !ping, !help, !profile, !leaderboard"
+                elif cmd == "!profile":
+                    user_data = db.get_user(sender_id)
+                    coins = user_data.get("coins", 0) if user_data else 0
+                    r = f"@{username} | Coins: {coins}"
+                elif cmd == "!leaderboard":
+                    top = db.get_leaderboard(limit=5)
+                    lines = [f"{i+1}. {u.get('username', 'User')}: {u.get('coins', 0)} coins" for i, u in enumerate(top)]
+                    r = "Leaderboard:\n" + "\n".join(lines) if lines else "No data yet."
+
+                if r:
+                    async with send_lock:
+                        await asyncio.to_thread(ig.send, r)
+                        await asyncio.sleep(config.SEND_DELAY)
 
             await asyncio.to_thread(db.set_state, "last_ts", last_ts)
             if last_id:
@@ -190,12 +198,8 @@ async def run_bot(stop: asyncio.Event):
         except (ClientConnectionError, requests.RequestException, ConnectionError, TimeoutError) as e:
             fails += 1
             delay = min(300, 5 * 2 ** fails)
-            log.warning("Network error (%s). Retrying in %ss", e, delay)
+            log.error("Network error (%s). Retrying in %ss", e, delay)
             await _sleep(stop, delay)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            fails += 1
-            delay = min(300, 5 * 2 ** fails)
-            log.exception("Unexpected error. Retrying in %ss", delay)
-            await _sleep(stop, delay)
+        except Exception as e:
+            log.error("Error in bot loop: %s", e, exc_info=True)
+            await _sleep(stop, 10)
