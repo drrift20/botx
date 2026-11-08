@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}GC Economy{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">✦ GC Economy</div>
+    <nav>
+      <a href="/leaderboard" class="{{ 'active' if page == 'leaderboard' }}">Leaderboard</a>
+      <a href="/shop" class="{{ 'active' if page == 'shop' }}">Shop</a>
+    </nav>
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+  <footer>Earn coins in the chat: !daily · !work · !claim</footer>
+</body>
+</html>

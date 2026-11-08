@@ -1,0 +1,6 @@
+instagrapi
+fastapi
+uvicorn
+pymongo
+jinja2
+dnspython

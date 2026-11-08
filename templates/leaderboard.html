@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Leaderboard · GC Economy{% endblock %}
+{% block content %}
+<h1>🏆 Top 10 Richest</h1>
+{% if users %}
+<table>
+  <thead><tr><th>#</th><th>User</th><th>Badges</th><th>Streak</th><th class="num">Coins</th></tr></thead>
+  <tbody>
+  {% for u in users %}
+    <tr class="rank-{{ loop.index if loop.index <= 3 else 'n' }}">
+      <td>{{ ['🥇','🥈','🥉'][loop.index0] if loop.index <= 3 else loop.index }}</td>
+      <td>@{{ u.username }}</td>
+      <td>{{ u.badges }}</td>
+      <td>🔥 {{ u.streak }}</td>
+      <td class="num">{{ "{:,}".format(u.balance) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">Nobody has chatted yet. Be the first!</p>
+{% endif %}
+{% endblock %}

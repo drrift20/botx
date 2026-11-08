@@ -1,0 +1,41 @@
+:root{--bg:#0d0b1a;--panel:#171329;--line:#2a2447;--text:#e9e6ff;--muted:#8d86b5;
+--accent:#ff6ec7;--accent2:#7c5cff;--gold:#ffd166}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;color:var(--text);
+font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+background:radial-gradient(900px 500px at 15% -10%,#2b1b5a55,transparent),
+radial-gradient(800px 500px at 100% 0,#ff6ec722,transparent),var(--bg)}
+header{display:flex;justify-content:space-between;align-items:center;padding:18px 6vw;
+border-bottom:1px solid var(--line);backdrop-filter:blur(6px)}
+.brand{font-weight:700;letter-spacing:.08em;
+background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;
+background-clip:text;color:transparent}
+nav a{color:var(--muted);text-decoration:none;margin-left:20px;padding-bottom:4px;
+border-bottom:2px solid transparent;transition:.2s}
+nav a:hover,nav a.active{color:var(--text);border-color:var(--accent)}
+main{max-width:860px;margin:0 auto;padding:40px 6vw}
+h1{font-weight:600;margin:0 0 20px}
+.muted{color:var(--muted)}
+code{background:#0006;border:1px solid var(--line);border-radius:6px;padding:2px 7px;color:var(--accent)}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);
+border-radius:14px;overflow:hidden}
+th,td{padding:14px 16px;text-align:left}
+th{color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.1em;
+border-bottom:1px solid var(--line)}
+tbody tr{border-bottom:1px solid var(--line);transition:background .2s}
+tbody tr:hover{background:#ffffff08}
+tbody tr:last-child{border-bottom:0}
+.num{text-align:right;font-variant-numeric:tabular-nums;color:var(--gold);font-weight:600}
+.rank-1 td:nth-child(2){color:var(--gold);font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:18px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px;
+transition:transform .2s,border-color .2s}
+.card:hover{transform:translateY(-4px);border-color:var(--accent2)}
+.card h2{font-size:1.05rem;margin:10px 0 6px}
+.emoji{font-size:2.2rem}
+.tag{font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:var(--accent2);
+border:1px solid var(--accent2);border-radius:99px;padding:2px 9px}
+.foot{display:flex;justify-content:space-between;align-items:center;margin-top:16px}
+.price{color:var(--gold);font-weight:600}
+footer{text-align:center;color:var(--muted);padding:30px;font-size:.85rem}
+@media(max-width:560px){th:nth-child(3),td:nth-child(3),th:nth-child(4),td:nth-child(4){display:none}}

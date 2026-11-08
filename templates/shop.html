@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Shop · GC Economy{% endblock %}
+{% block content %}
+<h1>🛒 Shop</h1>
+<p class="muted">Buy in the chat with <code>!buy &lt;id&gt;</code></p>
+<div class="grid">
+  {% for i in items %}
+  <div class="card">
+    <div class="emoji">{{ i.emoji }}</div>
+    <span class="tag">{{ i.kind }}</span>
+    <h2>{{ i.name }}</h2>
+    <p class="muted">{{ i.description }}</p>
+    <div class="foot">
+      <span class="price">{{ "{:,}".format(i.price) }} 🪙</span>
+      <code>!buy {{ i.id }}</code>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

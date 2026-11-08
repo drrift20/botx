@@ -1,0 +1,19 @@
+{
+  "authorization_data": {
+    "ds_user_id": "43079876315",
+    "sessionid": "43079876315%3A9YGnRzkyd5oOPr%3A6%3AAYnLb4-bZ4wCPUiLlrJUcJw6gAlkqHbe3HqKZ0OySw"
+  },
+  "device_settings": {
+    "app_version": "1.0.0",
+    "version_code": "",
+    "android_version": null,
+    "android_release": null,
+    "dpi": "0dpi",
+    "resolution": "0x0",
+    "manufacturer": "Mozilla",
+    "device": "Desktop",
+    "model": "Chrome",
+    "cpu": ""
+  },
+  "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
