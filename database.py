@@ -1,3 +1,4 @@
+cat << 'EOF' > database.py
 """
 Ultra-light JSON-backed store.
 
@@ -196,3 +197,4 @@ class Database:
                 if k == uid:
                     return i, len(rows)
             return len(rows) + 1, len(rows)
+EOF
