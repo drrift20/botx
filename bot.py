@@ -1,6 +1,7 @@
 import os
 import time
 import random
+import json
 import logging
 from instagrapi import Client
 import database as db
@@ -30,11 +31,22 @@ class InstagramBot:
     def login(self):
         username = os.environ.get("INSTA_USERNAME")
         password = os.environ.get("INSTA_PASSWORD")
+        session_data = os.environ.get("SESSION_DATA")
         
+        # Handle SESSION_DATA env variable if provided
+        if session_data and not os.path.exists(SESSION_FILE):
+            try:
+                with open(SESSION_FILE, "w", encoding="utf-8") as f:
+                    f.write(session_data)
+                log.info("Successfully generated session.json from SESSION_DATA environment variable.")
+            except Exception as e:
+                log.warning("Failed to write session.json from SESSION_DATA: %s", e)
+
         if os.path.exists(SESSION_FILE):
             try:
                 self.cl.load_settings(SESSION_FILE)
-                self.cl.login(username, password)
+                if username and password:
+                    self.cl.login(username, password)
                 log.info("Logged in using session file.")
                 return
             except Exception as e:
@@ -45,7 +57,7 @@ class InstagramBot:
             self.cl.dump_settings(SESSION_FILE)
             log.info("Logged in with username/password and saved session.")
         else:
-            raise ValueError("No credentials or session found.")
+            raise ValueError("Both INSTA_USERNAME and INSTA_PASSWORD (or valid session) must be provided.")
 
     def poll_loop(self):
         log.info("Starting bot poll loop for thread %s", self.thread_id)
@@ -53,11 +65,11 @@ class InstagramBot:
         while True:
             try:
                 thread = self.cl.direct_thread(self.thread_id)
-                for msg in thread.messages[:10]:
+                for msg in thread.messages[:15]:
                     if msg.id in seen_messages:
                         continue
                     seen_messages.add(msg.id)
-                    if len(seen_messages) > 200:
+                    if len(seen_messages) > 300:
                         seen_messages.pop()
 
                     text = msg.text
@@ -87,9 +99,8 @@ class InstagramBot:
                             mock_msg = MockMessage(MockUser(user_pk, uname), text, args)
                             try:
                                 func = self.commands[cmd]
+                                # Check function signature or call with args/kwargs
                                 func(mock_msg, *args) if args else func(mock_msg)
-                            except TypeError:
-                                func(mock_msg)
                             except Exception as e:
                                 log.error("Error executing command %s: %s", cmd, e)
             except Exception as e:
@@ -98,11 +109,12 @@ class InstagramBot:
 
 bot = InstagramBot()
 
-# Register all commands
+# --- REGISTER ALL COMMANDS ---
+
 @bot.command("daily")
 def cmd_daily(message):
     uid = str(message.user.pk)
-    res = db.db.claim_daily(uid, message.user.username) if hasattr(db, "db") else db.claim_daily(uid, message.user.username)
+    res = db.db.claim_daily(uid, message.user.username) if hasattr(db, "db") else db.Database().claim_daily(uid, message.user.username)
     if not res["ok"]:
         hours = int(res["remaining"] // 3600)
         mins = int((res["remaining"] % 3600) // 60)
@@ -112,8 +124,10 @@ def cmd_daily(message):
 @bot.command("work")
 def cmd_work(message):
     uid = str(message.user.pk)
-    user = db.get_user(uid, message.user.username)
-    cooldown = 1800
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    user = database_inst.get_user(uid, message.user.username)
+    
+    cooldown = 1800 # 30 mins
     left = cooldown - (time.time() - user.get("last_work", 0))
     if left > 0:
         mins = int(left // 60)
@@ -128,7 +142,6 @@ def cmd_work(message):
     job_desc, min_c, max_c = random.choice(jobs)
     earned = random.randint(min_c, max_c)
     
-    database_inst = db.db if hasattr(db, "db") else db.Database()
     with database_inst._lock:
         u = database_inst._get(uid)
         u["balance"] += earned
@@ -141,8 +154,10 @@ def cmd_work(message):
 @bot.command("crime")
 def cmd_crime(message):
     uid = str(message.user.pk)
-    user = db.get_user(uid, message.user.username)
-    cooldown = 3600
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    user = database_inst.get_user(uid, message.user.username)
+    
+    cooldown = 3600 # 1 hour
     left = cooldown - (time.time() - user.get("last_crime", 0))
     if left > 0:
         mins = int(left // 60)
@@ -162,7 +177,6 @@ def cmd_crime(message):
     ]
     crime_name, min_w, max_w, min_f, max_f = random.choice(crimes)
     
-    database_inst = db.db if hasattr(db, "db") else db.Database()
     with database_inst._lock:
         u = database_inst._get(uid)
         u["last_crime"] = time.time()
@@ -185,7 +199,8 @@ def cmd_crime(message):
 @bot.command("bank")
 def cmd_bank(message, action=None, amount=0):
     uid = str(message.user.pk)
-    user = db.get_user(uid, message.user.username)
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    user = database_inst.get_user(uid, message.user.username)
     
     try:
         amount = int(amount)
@@ -196,7 +211,6 @@ def cmd_bank(message, action=None, amount=0):
         return bot.reply(message, f"🏦 **CENTRAL BANK**\n- Cash: {user['balance']} coins\n- Bank Vault: {user['bank']} coins\n- Outstanding Debt: {user['debt']} coins\n\nUsage: `!bank deposit <amt>`, `!bank withdraw <amt>`, `!bank loan <amt>`, `!bank repay <amt>`")
     
     action = action.lower()
-    database_inst = db.db if hasattr(db, "db") else db.Database()
     with database_inst._lock:
         u = database_inst._get(uid)
         if action == "deposit":
@@ -241,14 +255,14 @@ def cmd_shop(message):
 @bot.command("buy")
 def cmd_buy(message, item_name=""):
     uid = str(message.user.pk)
-    user = db.get_user(uid, message.user.username)
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    user = database_inst.get_user(uid, message.user.username)
     
     if item_name.lower() in ["potion", "luck"]:
         cost = 300
         if user["balance"] < cost:
             return bot.reply(message, f"❌ You do not have enough coins! A Luck Potion costs {cost} coins.")
         
-        database_inst = db.db if hasattr(db, "db") else db.Database()
         with database_inst._lock:
             u = database_inst._get(uid)
             u["balance"] -= cost
