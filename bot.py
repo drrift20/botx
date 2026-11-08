@@ -259,7 +259,6 @@ def cmd_buy(message, item_name=""):
             
         bot.reply(message, f"🧪 You purchased a **Luck Potion**! Total potions: {u['inventory']['luck_potion']}. Use it wisely on your next crime or gamble!")
 
-def run_bot(bot_instance=None):
-    b = bot_instance if bot_instance else bot
-    b.login()
-    b.poll_loop()
+def run_bot(*args, **kwargs):
+    bot.login()
+    bot.poll_loop()
