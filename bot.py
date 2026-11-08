@@ -13,7 +13,8 @@ SESSION_FILE = "session.json"
 class InstagramBot:
     def __init__(self):
         self.cl = Client()
-        self.thread_id = os.environ.get("INSTA_THREAD_ID")
+        # Checks THREAD_ID first, then falls back to INSTA_THREAD_ID
+        self.thread_id = os.environ.get("THREAD_ID") or os.environ.get("INSTA_THREAD_ID")
         self.commands = {}
 
     def command(self, name):
