@@ -8,6 +8,18 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
 
+# --- Automatic Session File Generator for Render ---
+# If SESSION_DATA environment variable is set (on Render), write it to session.json
+session_data = os.environ.get("SESSION_DATA")
+if session_data:
+    session_file = BASE_DIR / "session.json"
+    try:
+        with open(session_file, "w", encoding="utf-8") as f:
+            f.write(session_data)
+        print("Successfully generated session.json from SESSION_DATA environment variable.")
+    except Exception as e:
+        print(f"Failed to write session.json: {e}")
+
 # --- Secrets / environment (set these in the Render dashboard) --------------
 USERNAME = os.environ.get("IG_USERNAME", "")
 PASSWORD = os.environ.get("IG_PASSWORD", "")
