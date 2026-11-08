@@ -1,110 +1,194 @@
-"""In-memory database mock supporting all bot, game, and web features."""
+"""
+Ultra-light JSON-backed store.
+
+- Everything lives in one in-memory dict (a few KB even with hundreds of users).
+- Disk is touched only by a debounced, atomic flush (tmp file + os.replace),
+  so a crash mid-write can never corrupt the data file.
+- One RLock guards all access, so the FastAPI thread and the bot thread are safe.
+"""
+import json
+import logging
+import os
+import threading
 import time
 
-# In-memory stores
-_state = {}
-_users = {}
+log = logging.getLogger("botx.db")
 
-def init_db():
-    print("⚠️ Running with In-Memory Database (No MongoDB required for testing)")
+DB_PATH = os.environ.get("DB_PATH", "data.json")
+FLUSH_INTERVAL = 15          # seconds between disk writes (only if something changed)
+START_BALANCE = 500
+MAX_BALANCE = 10 ** 12       # sanity cap
 
-# State management (used by bot.py for session & timestamps)
-def get_state(key: str, default=None):
-    return _state.get(key, default)
+DAILY_COOLDOWN = 24 * 3600
+STREAK_WINDOW = 48 * 3600    # claim again within 48h to keep your streak
+DAILY_BASE = 500
+STREAK_STEP = 50             # +50 per streak day
+STREAK_CAP = 10              # bonus maxes out at +500
 
-def set_state(key: str, value):
-    _state[key] = value
 
-# User management & economy
-def get_user(user_id: str):
-    uid = str(user_id)
-    if uid not in _users:
-        _users[uid] = {"user_id": uid, "username": f"user_{uid}", "balance": 1000, "inventory": [], "streak": 0}
-    return _users[uid]
+class Database:
+    def __init__(self, path: str = DB_PATH):
+        self.path = path
+        self._lock = threading.RLock()
+        self._io_lock = threading.Lock()
+        self._users: dict = {}
+        self._dirty = False
+        self._stop = threading.Event()
+        self._load()
+        threading.Thread(target=self._flush_loop, daemon=True, name="db-flush").start()
 
-def upsert_user(user_id: str, username: str):
-    uid = str(user_id)
-    u = get_user(uid)
-    if username:
-        u["username"] = username
-    return u
+    # ---------- persistence ----------
+    def _load(self):
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            users = data.get("users", {}) if isinstance(data, dict) else {}
+            self._users = users if isinstance(users, dict) else {}
+            log.info("Loaded %d users from %s", len(self._users), self.path)
+        except FileNotFoundError:
+            log.info("No data file yet, starting fresh.")
+        except (json.JSONDecodeError, OSError) as e:
+            log.error("Data file unreadable (%s); keeping a backup and starting fresh.", e)
+            try:
+                os.replace(self.path, self.path + ".corrupt")
+            except OSError:
+                pass
 
-def get_user_by_username(username: str):
-    for u in _users.values():
-        if u.get("username", "").lower() == username.lower():
-            return u
-    return None
+    def flush(self):
+        with self._io_lock:
+            with self._lock:
+                if not self._dirty:
+                    return
+                payload = json.dumps({"users": self._users}, separators=(",", ":"))
+                self._dirty = False
+            try:
+                folder = os.path.dirname(os.path.abspath(self.path))
+                os.makedirs(folder, exist_ok=True)
+                tmp = self.path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, self.path)
+            except OSError as e:
+                log.error("Flush failed: %s", e)
+                with self._lock:
+                    self._dirty = True
 
-def claim_daily(user_id: str):
-    uid = str(user_id)
-    u = get_user(uid)
-    now = time.time()
-    last = u.get("last_daily", 0)
-    if now - last < 86400:
-        return False, int(86400 - (now - last))
-    u["last_daily"] = now
-    u["streak"] = u.get("streak", 0) + 1
-    reward = 250
-    bonus = 20 * u["streak"]
-    streak = u["streak"]
-    u["balance"] += (reward + bonus)
-    return True, (reward, bonus, streak, u["balance"])
+    def _flush_loop(self):
+        while not self._stop.wait(FLUSH_INTERVAL):
+            self.flush()
 
-def claim_work(user_id: str):
-    uid = str(user_id)
-    u = get_user(uid)
-    now = time.time()
-    last = u.get("last_work", 0)
-    if now - last < 3600:
-        return False, int(3600 - (now - last))
-    u["last_work"] = now
-    earned = 50
-    u["balance"] += earned
-    return True, (earned, u["balance"])
+    def close(self):
+        self._stop.set()
+        self.flush()
 
-def claim_chest(user_id: str):
-    uid = str(user_id)
-    u = get_user(uid)
-    reward = 150
-    u["balance"] += reward
-    return reward, u["balance"]
+    # ---------- internals ----------
+    def _get(self, uid: str, username: str | None = None) -> dict:
+        """Get-or-create. Caller must hold the lock."""
+        uid = str(uid)
+        u = self._users.get(uid)
+        if u is None:
+            u = {
+                "username": username or f"user{uid[-4:]}",
+                "balance": START_BALANCE,
+                "last_daily": 0.0,
+                "streak": 0,
+                "last_rob": 0.0,
+                "wins": 0,
+                "losses": 0,
+                "rob_ok": 0,
+                "rob_fail": 0,
+            }
+            self._users[uid] = u
+            self._dirty = True
+        elif username and u.get("username") != username:
+            u["username"] = username
+            self._dirty = True
+        return u
 
-def rob(robber_id: str, victim_id: str):
-    r = get_user(robber_id)
-    v = get_user(victim_id)
-    if v["balance"] < 50:
-        return {"success": False, "reason": "poor"}
-    amount = int(v["balance"] * 0.2)
-    v["balance"] -= amount
-    r["balance"] += amount
-    return {"success": True, "amount": amount, "balance": r["balance"]}
+    # ---------- public API ----------
+    def get_user(self, uid, username: str | None = None) -> dict:
+        """Returns a snapshot copy (safe to read without the lock)."""
+        with self._lock:
+            return dict(self._get(uid, username))
 
-def duel(from_id: str, to_id: str, amount: int):
-    f = get_user(from_id)
-    t = get_user(to_id)
-    if f["balance"] < amount or t["balance"] < amount:
-        return {"success": False, "reason": "balance"}
-    f["balance"] += amount
-    t["balance"] -= amount
-    return {"success": True, "winner": from_id, "amount": amount}
+    def user_count(self) -> int:
+        with self._lock:
+            return len(self._users)
 
-def buy_item(user_id: str, item_id: int):
-    u = get_user(user_id)
-    if u["balance"] < 100:
-        return {"success": False, "reason": "balance"}
-    u["balance"] -= 100
-    u["inventory"].append(f"Item {item_id}")
-    return {"success": True}
+    def find_uid(self, username: str):
+        name = username.lower()
+        with self._lock:
+            for uid, u in self._users.items():
+                if u.get("username", "").lower() == name:
+                    return uid
+        return None
 
-def register_message():
-    return True
+    def claim_daily(self, uid, username: str | None = None) -> dict:
+        now = time.time()
+        with self._lock:
+            u = self._get(uid, username)
+            left = DAILY_COOLDOWN - (now - u["last_daily"])
+            if left > 0:
+                return {"ok": False, "remaining": left, "balance": u["balance"], "streak": u["streak"]}
+            if u["last_daily"] and now - u["last_daily"] <= STREAK_WINDOW:
+                u["streak"] += 1
+            else:
+                u["streak"] = 1
+            amount = DAILY_BASE + min(u["streak"] - 1, STREAK_CAP) * STREAK_STEP
+            u["balance"] = min(u["balance"] + amount, MAX_BALANCE)
+            u["last_daily"] = now
+            self._dirty = True
+            return {"ok": True, "amount": amount, "streak": u["streak"], "balance": u["balance"]}
 
-def top_users(limit=10):
-    sorted_users = sorted(_users.values(), key=lambda x: x["balance"], reverse=True)
-    return sorted_users[:limit]
+    def settle_bet(self, uid, bet: int, returned: int):
+        """Take `bet`, pay back `returned`. Returns (ok, new_balance)."""
+        with self._lock:
+            u = self._get(uid)
+            if bet <= 0 or bet > u["balance"]:
+                return False, u["balance"]
+            u["balance"] = min(u["balance"] - bet + returned, MAX_BALANCE)
+            if returned > bet:
+                u["wins"] += 1
+            elif returned < bet:
+                u["losses"] += 1
+            self._dirty = True
+            return True, u["balance"]
 
-def shop_items():
-    return [
-        {"id": 1, "name": "Shield", "price": 100},
-        {"id": 2, "name": "Sword", "price": 250}
-    ]
+    def transfer(self, src, dst, amount: int) -> int:
+        """Moves up to `amount` coins from src to dst. Returns what actually moved."""
+        with self._lock:
+            a, b = self._get(src), self._get(dst)
+            amt = max(0, min(int(amount), a["balance"]))
+            if amt:
+                a["balance"] -= amt
+                b["balance"] = min(b["balance"] + amt, MAX_BALANCE)
+                self._dirty = True
+            return amt
+
+    def rob_cooldown_left(self, uid, cooldown: float) -> float:
+        with self._lock:
+            u = self._get(uid)
+            return max(0.0, cooldown - (time.time() - u["last_rob"]))
+
+    def mark_rob(self, uid, success: bool):
+        with self._lock:
+            u = self._get(uid)
+            u["last_rob"] = time.time()
+            u["rob_ok" if success else "rob_fail"] += 1
+            self._dirty = True
+
+    def top(self, n: int = 10):
+        with self._lock:
+            rows = sorted(self._users.items(), key=lambda kv: kv[1]["balance"], reverse=True)[:n]
+            return [(uid, u["username"], u["balance"]) for uid, u in rows]
+
+    def rank(self, uid):
+        uid = str(uid)
+        with self._lock:
+            rows = sorted(self._users.items(), key=lambda kv: kv[1]["balance"], reverse=True)
+            for i, (k, _) in enumerate(rows, 1):
+                if k == uid:
+                    return i, len(rows)
+            return len(rows) + 1, len(rows)
