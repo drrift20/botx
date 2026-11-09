@@ -60,6 +60,68 @@ class InstagramBot:
             self.bot_user_id = str(self.cl.user_id)
         else:
             raise ValueError("Both INSTA_USERNAME and INSTA_PASSWORD (or valid session) must be provided.")
+import os
+import time
+import random
+import json
+import logging
+from instagrapi import Client
+import database as db
+
+log = logging.getLogger("botx.bot")
+
+SESSION_FILE = "session.json"
+
+class InstagramBot:
+    def __init__(self):
+        self.cl = Client()
+        self.thread_id = os.environ.get("THREAD_ID") or os.environ.get("INSTA_THREAD_ID")
+        self.commands = {}
+        self.bot_user_id = None
+
+    def command(self, name):
+        def decorator(func):
+            self.commands[name.lower()] = func
+            return func
+        return decorator
+
+    def reply(self, message, text):
+        try:
+            self.cl.direct_send(text, thread_ids=[self.thread_id])
+        except Exception as e:
+            log.error("Failed to send reply: %s", e)
+
+    def login(self):
+        username = os.environ.get("INSTA_USERNAME")
+        password = os.environ.get("INSTA_PASSWORD")
+        session_data = os.environ.get("SESSION_DATA")
+        
+        if session_data and not os.path.exists(SESSION_FILE):
+            try:
+                with open(SESSION_FILE, "w", encoding="utf-8") as f:
+                    f.write(session_data)
+                log.info("Successfully generated session.json from SESSION_DATA environment variable.")
+            except Exception as e:
+                log.warning("Failed to write session.json from SESSION_DATA: %s", e)
+
+        if os.path.exists(SESSION_FILE):
+            try:
+                self.cl.load_settings(SESSION_FILE)
+                if username and password:
+                    self.cl.login(username, password)
+                log.info("Logged in using session file.")
+                self.bot_user_id = str(self.cl.user_id)
+                return
+            except Exception as e:
+                log.warning("Session load failed (%s), logging in fresh...", e)
+        
+        if username and password:
+            self.cl.login(username, password)
+            self.cl.dump_settings(SESSION_FILE)
+            log.info("Logged in with username/password and saved session.")
+            self.bot_user_id = str(self.cl.user_id)
+        else:
+            raise ValueError("Both INSTA_USERNAME and INSTA_PASSWORD (or valid session) must be provided.")
 
     def poll_loop(self):
         log.info("Starting bot poll loop for thread %s", self.thread_id)
@@ -142,16 +204,17 @@ def cmd_help(message):
                       "- `!gang create <name>` - Establish a syndicate gang (2000 coins)\n"
                       "- `!gang invite <user>` / `!gang apply <name>` - Recruitment\n"
                       "- `!gang accept` / `!gang decline` - Join gang\n"
-                      "- `!gang deposit <amt>` / `!gang vault` - Shared treasury\n"
+                      "- `!gang vault` - View shared treasury\n"
+                      "- `!gang deposit <amt>` - Add funds\n"
                       "- `!gang withdraw <amt>` - Request vault funds (Underboss Vote)\n"
                       "- `!gang vote <yes/no>` - Vote on boss withdrawal requests\n"
-                      "- `!gang heist` - Raid Central Bank (Risk stealing from all players!)\n"
-                      "- `!gang war <rival>` - Attack rival gang vault\n"
-                      "- `!gang lb` - Weekly Gang Leaderboard\n\n"
-                      "🏦 **Bank & Black Market:**\n"
+                      "- `!gang heist` - Raid Central Bank (Bribe pass lowers risk!)\n"
+                      "- `!gang war <rival>` - Attack rival gang vault (Shield blocks losses!)\n"
+                      "- `!gang lb` - Weekly Gang Leaderboard\n"
+                      "- `!gang shop` & `!gang buy <item>` - Gang Black Market Gear\n\n"
+                      "🏦 **Bank & Gambling:**\n"
                       "- `!bank` - Vault & Syndicate loans\n"
-                      "- `!shop` & `!gangshop` - Black Market Gear\n"
-                      "- `!buy <item>` - Purchase items")
+                      "- `!coinflip <amt/all/half> <heads/tails>` - Bug-free double or nothing!")
 
 @bot.command("ping")
 def cmd_ping(message):
@@ -527,7 +590,7 @@ def cmd_gang(message, action=None, *args):
                                  "- `!gang heist` - Raid Central Bank\n"
                                  "- `!gang war <rival>` - Attack rival gang\n"
                                  "- `!gang lb` - Weekly Gang Leaderboard\n"
-                                 "- `!gang shop` - Gang black market")
+                                 "- `!gang shop` & `!gang buy <item>` - Gang Black Market")
 
     action = action.lower()
     
@@ -568,7 +631,6 @@ def cmd_gang(message, action=None, *args):
     elif action == "accept":
         gang = database_inst.gangs.find_one({"$or": [{"invites": uid}, {"boss_uid": uid}]})
         if not gang:
-            # Check if boss accepting application
             user_gang = database_inst.get_user_gang(uid)
             if user_gang and user_gang["boss_uid"] == uid and user_gang.get("applications"):
                 applicant_uid = user_gang["applications"][0]
@@ -587,7 +649,8 @@ def cmd_gang(message, action=None, *args):
         gang = database_inst.get_user_gang(uid)
         if not gang:
             return bot.reply(message, "❌ You are not in any gang!")
-        return bot.reply(message, f"🏦 **{gang['name']} TREASURY**\n- Vault Balance: 💵 {gang['vault']} coins\n- Members: {len(gang['members'])}")
+        items_str = ", ".join([f"{k}: {v}" for k, v in gang.get("items", {}).items() if v > 0]) or "None 🚫"
+        return bot.reply(message, f"🏦 **{gang['name']} TREASURY**\n- Vault Balance: 💵 {gang['vault']} coins\n- Members: {len(gang['members'])}\n- Gang Gear: {items_str}")
 
     elif action == "deposit":
         if not args:
@@ -621,7 +684,6 @@ def cmd_gang(message, action=None, *args):
         if amt > gang["vault"]:
             return bot.reply(message, "❌ Gang vault doesn't have that much!")
         
-        # Underboss Vote System
         vote_data = {"amount": amt, "yes": [uid], "no": [], "voted": [uid]}
         database_inst.gangs.update_one({"_id": gang["_id"]}, {"$set": {"active_vote": vote_data}})
         return bot.reply(message, f"🗳️ **DON WITHDRAWAL REQUEST:** Boss @{user['username']} requested **{amt} coins** from vault!\nMembers must type `!gang vote yes` or `!gang vote no`.")
@@ -647,7 +709,6 @@ def cmd_gang(message, action=None, *args):
         yes_votes = len(vote["yes"])
         
         if yes_votes >= (total_members // 2) + 1:
-            # Vote Passed! Transfer coins to boss
             amt = vote["amount"]
             database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": -amt}, "$set": {"active_vote": None}})
             database_inst.users.update_one({"_id": gang["boss_uid"]}, {"$inc": {"balance": amt}})
@@ -670,8 +731,17 @@ def cmd_gang(message, action=None, *args):
         
         database_inst.gangs.update_one({"_id": gang["_id"]}, {"$set": {"last_heist": time.time()}})
         
-        if random.random() < 0.30:
-            # Successful Central Bank Heist! Steal 10% from all players' bank vaults across server
+        # Check if gang has Syndicate Bribe Pass
+        gang_items = gang.get("items", {})
+        success_prob = 0.60 if gang_items.get("bribe_pass", 0) > 0 else 0.30
+        if gang_items.get("bribe_pass", 0) > 0:
+            gang_items["bribe_pass"] -= 1 # Consume pass
+            database_inst.gangs.update_one({"_id": gang["_id"]}, {"$set": {"items": gang_items}})
+            pass_msg = " *(💎 Syndicate Bribe Pass used: Success chance boosted!)*"
+        else:
+            pass_msg = ""
+
+        if random.random() < success_prob:
             all_users = list(database_inst.users.find({}))
             total_stolen = 0
             for u in all_users:
@@ -682,11 +752,11 @@ def cmd_gang(message, action=None, *args):
                     database_inst.users.update_one({"_id": u["_id"]}, {"$inc": {"bank": -stolen_amt}})
             
             database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": total_stolen}})
-            return bot.reply(message, f"🚨 **CENTRAL BANK RAID SUCCESSFUL!** Gang @{user['username']}'s syndicate looted **+{total_stolen} coins** from player bank vaults across the city! 💰🔥")
+            return bot.reply(message, f"🚨 **CENTRAL BANK RAID SUCCESSFUL!** Gang @{user['username']}'s syndicate looted **+{total_stolen} coins** from player bank vaults!{pass_msg} 💰🔥")
         else:
             fine = 500
             database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": -min(fine, gang["vault"])}})
-            return bot.reply(message, f"💥 **HEIST FAILED!** Police ambushed the bank vault! Gang vault fined **-{fine} coins**! 🚓💀")
+            return bot.reply(message, f"💥 **HEIST FAILED!** Police ambushed the bank vault! Gang vault fined **-{fine} coins**!{pass_msg} 🚓💀")
 
     elif action == "lb":
         all_gangs = list(database_inst.gangs.find({}).sort("vault", -1).limit(5))
@@ -696,6 +766,49 @@ def cmd_gang(message, action=None, *args):
         for i, g in enumerate(all_gangs, 1):
             lb_txt += f"{i}. **{g['name']}** — 🏦 {g['vault']} vault coins ({len(g['members'])} members)\n"
         return bot.reply(message, lb_txt)
+
+    elif action == "shop":
+        return bot.reply(message, "🛒 **GANG BLACK MARKET SHOP**\n\n"
+                                 "1. `!gang buy shield` (2500 coins - Gang Vault)\n"
+                                 "   *Vault Reinforced Lock*: Blocks 50% losses during raids.\n\n"
+                                 "2. `!gang buy c4` (1800 coins - Gang Vault)\n"
+                                 "   *C4 Explosive Pack*: Sabotage rival gang cooldowns.\n\n"
+                                 "3. `!gang buy pass` (3000 coins - Gang Vault)\n"
+                                 "   *Syndicate Bribe Pass*: Boosts Central Bank heist success to 60%.\n\n"
+                                 "Type `!gang buy <shield/c4/pass>` to purchase using Gang Vault funds!")
+
+    elif action == "buy":
+        if not args:
+            return bot.reply(message, "❌ Usage: `!gang buy <shield/c4/pass>`")
+        gang = database_inst.get_user_gang(uid)
+        if not gang or gang["boss_uid"] != uid:
+            return bot.reply(message, "❌ Only the Gang Boss (Don) can purchase items from the Gang Shop!")
+        
+        item_key = args[0].lower()
+        shop_items = {
+            "shield": {"name": "Vault Reinforced Lock", "cost": 2500, "key": "vault_shield"},
+            "c4": {"name": "C4 Explosive Pack", "cost": 1800, "key": "c4_explosive"},
+            "pass": {"name": "Syndicate Bribe Pass", "cost": 3000, "key": "bribe_pass"}
+        }
+        
+        if item_key not in shop_items:
+            return bot.reply(message, "❌ Invalid item! Check `!gang shop`.")
+        
+        item = shop_items[item_key]
+        if gang["vault"] < item["cost"]:
+            return bot.reply(message, f"❌ Gang vault needs at least {item['cost']} coins to buy {item['name']}!")
+        
+        gang_items = gang.get("items", {})
+        gang_items[item["key"]] = gang_items.get(item["key"], 0) + 1
+        
+        database_inst.gangs.update_one(
+            {"_id": gang["_id"]},
+            {
+                "$inc": {"vault": -item["cost"]},
+                "$set": {"items": gang_items}
+            }
+        )
+        return bot.reply(message, f"🛒 Successfully purchased **{item['name']}** for the syndicate vault! 🔥")
 
 @bot.command("coinflip")
 def cmd_coinflip(message, bet=0, choice="heads"):
@@ -719,17 +832,19 @@ def cmd_coinflip(message, bet=0, choice="heads"):
     
     choice = choice.lower()
     if choice not in ["heads", "tails"]:
-        choice = "heads"
+        return bot.reply(message, "❌ Invalid choice! Choose either `heads` or `tails`.")
 
     outcome = random.choice(["heads", "tails"])
     
+    # FIX: Bulletproof string comparison for coinflip outcome & choice
     if outcome == choice:
         database_inst.users.update_one({"_id": str(uid)}, {"$inc": {"balance": bet}})
         earned_info = database_inst.apply_debt_garnishment(uid, bet)
         bot.reply(message, f"🪙 Coin landed on **{outcome.upper()}**! You won **+{bet} coins**! *(Debt paid: {earned_info['garnished']})* 🎉 (Balance: {earned_info['new_balance']})")
     else:
         database_inst.users.update_one({"_id": str(uid)}, {"$inc": {"balance": -bet}})
-        bot.reply(message, f"🪙 Coin landed on **{outcome.upper()}**! You lost **-{bet} coins**! 💀 (Balance: {user['balance'] - bet})")
+        updated_user = database_inst.get_user(uid)
+        bot.reply(message, f"🪙 Coin landed on **{outcome.upper()}**! You lost **-{bet} coins**! 💀 (Balance: {updated_user['balance']})")
 
 @bot.command("roll")
 def cmd_roll(message):
