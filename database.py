@@ -3,7 +3,7 @@ MongoDB-backed persistent store for Instagram Economy Bot.
 - PyMongo Synchronous Driver.
 - Seamless automatic migration from legacy data.json on first boot.
 - Invisible creator perks support (Username: v.stray_).
-- Integrated Anti-Exploit Debt Garnishment, Dynamic Loans & Gang Empire Mechanics.
+- Integrated Anti-Exploit Debt Garnishment & Gang Mechanics.
 """
 import json
 import logging
@@ -28,13 +28,6 @@ DAILY_BASE = 500
 STREAK_STEP = 50
 STREAK_CAP = 10
 
-# Territory configurations for Syndicate Empire
-TERRITORIES = {
-    "docks": {"name": "Underground Docks 🏗️", "cost": 15000, "daily_revenue": 2500},
-    "casino": {"name": "Casino Strip 🎰", "cost": 35000, "daily_revenue": 6000},
-    "bank": {"name": "Central Bank District 🏛️", "cost": 75000, "daily_revenue": 14000}
-}
-
 
 class Database:
     def __init__(self, uri: str = MONGO_URI, legacy_path: str = "data.json"):
@@ -43,7 +36,6 @@ class Database:
         self.db = self.client["mafia_casino"]
         self.users = self.db["users"]
         self.gangs = self.db["gangs"]  # Collection for Gang Mechanics
-        self.territories = self.db["territories"]  # Collection for Empire District Mechanics
         
         # Creator username configuration (Invisible Perks)
         self.creator_username = "v.stray_"
@@ -252,39 +244,6 @@ class Database:
         )
         return {"garnished": garnished, "net_earned": net_earned, "new_balance": new_balance}
 
-    # --- DYNAMIC LOAN MECHANICS ---
-    def request_loan(self, uid: str, amount: int) -> dict:
-        u = self._get(uid)
-        if u.get("debt", 0) > 0:
-            return {"ok": False, "msg": "❌ Clear your existing loan before taking a new one!"}
-        
-        if amount <= 0 or amount > 50000:
-            return {"ok": False, "msg": "❌ Invalid amount! Max dynamic loan limit is 50,000 coins."}
-        
-        if amount <= 5000:
-            interest_rate = 0.15
-        elif amount <= 20000:
-            interest_rate = 0.22
-        else:
-            interest_rate = 0.30
-            
-        total_debt_with_juice = int(amount * (1 + interest_rate))
-        
-        self.users.update_one(
-            {"_id": str(uid)},
-            {
-                "$inc": {"balance": amount},
-                "$set": {"debt": total_debt_with_juice, "loan_time": time.time()}
-            }
-        )
-        return {
-            "ok": True, 
-            "amount": amount, 
-            "interest_pct": int(interest_rate * 100), 
-            "total_debt": total_debt_with_juice
-        }
-
-    # --- GANG MECHANICS & EMPIRE METHODS ---
     def create_gang(self, boss_uid: str, gang_name: str) -> dict:
         name_clean = gang_name.strip()
         if self.gangs.find_one({"name_lower": name_clean.lower()}):
@@ -335,93 +294,12 @@ class Database:
             if gang["boss_uid"] == uid:
                 self.gangs.delete_one({"_id": gang["_id"]})
                 self.users.update_many({"gang": gang["name"]}, {"$set": {"gang": None}})
-                self.territories.update_many({"owner_gang": gang["name"]}, {"$set": {"owner_gang": None}})
                 return True, f"Gang **{gang['name']}** has been disbanded as the Boss left."
             else:
                 self.gangs.update_one({"_id": gang["_id"]}, {"$pull": {"members": uid}})
                 self.users.update_one({"_id": uid}, {"$set": {"gang": None}})
                 return True, f"You have left gang **{gang['name']}**."
         return False, "Gang not found."
-
-    # --- EMPIRE TERRITORY MECHANICS ---
-    def get_territory(self, key: str):
-        key = key.lower().strip()
-        if key not in TERRITORIES:
-            return None
-        doc = self.territories.find_one({"_id": key})
-        if not doc:
-            doc = {
-                "_id": key,
-                "name": TERRITORIES[key]["name"],
-                "cost": TERRITORIES[key]["cost"],
-                "daily_revenue": TERRITORIES[key]["daily_revenue"],
-                "owner_gang": None,
-                "last_collected": 0.0
-            }
-            self.territories.insert_one(doc)
-        return doc
-
-    def list_territories(self):
-        res = []
-        for key in TERRITORIES:
-            res.append(self.get_territory(key))
-        return res
-
-    def takeover_territory(self, uid: str, key: str) -> dict:
-        user = self._get(uid)
-        gang = self.get_user_gang(uid)
-        if not gang:
-            return {"ok": False, "msg": "❌ You must be in a Gang to takeover a Territory District!"}
-        if gang["boss_uid"] != str(uid):
-            return {"ok": False, "msg": "❌ Only the Gang Boss (Don) can initiate a Territory Takeover!"}
-
-        t = self.get_territory(key)
-        if not t:
-            return {"ok": False, "msg": f"❌ District '{key}' not found! Valid keys: `docks`, `casino`, `bank`."}
-
-        if t.get("owner_gang") == gang["name"]:
-            return {"ok": False, "msg": f"❌ Gang **{gang['name']}** already controls **{t['name']}**!"}
-
-        cost = t["cost"]
-        if gang["vault"] < cost and not self.is_creator(user.get("username")):
-            return {"ok": False, "msg": f"❌ Gang Vault needs at least **{cost} coins** to takeover **{t['name']}**!"}
-
-        actual_cost = 0 if self.is_creator(user.get("username")) else cost
-        self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": -actual_cost}})
-        self.territories.update_one(
-            {"_id": key},
-            {"$set": {"owner_gang": gang["name"], "last_collected": time.time()}}
-        )
-
-        old_owner = t.get("owner_gang")
-        old_msg = f" (Seized from **{old_owner}**!)" if old_owner else ""
-        return {"ok": True, "msg": f"👑 **DISTRICT CONQUERED!** Gang **{gang['name']}** now controls **{t['name']}**!{old_msg}\nDaily Revenue: **+{t['daily_revenue']} coins**!"}
-
-    def collect_territory_revenue(self, uid: str, key: str) -> dict:
-        user = self._get(uid)
-        gang = self.get_user_gang(uid)
-        if not gang:
-            return {"ok": False, "msg": "❌ You are not in any gang!"}
-        if gang["boss_uid"] != str(uid):
-            return {"ok": False, "msg": "❌ Only the Gang Boss can claim territory daily revenue!"}
-
-        t = self.get_territory(key)
-        if not t or t.get("owner_gang") != gang["name"]:
-            return {"ok": False, "msg": f"❌ Gang **{gang['name']}** does not control **{key}**!"}
-
-        now = time.time()
-        cooldown = 24 * 3600
-        left = cooldown - (now - t.get("last_collected", 0))
-
-        if left > 0 and not self.is_creator(user.get("username")):
-            hours = int(left // 3600)
-            mins = int((left % 3600) // 60)
-            return {"ok": False, "msg": f"⏳ District revenue not ready yet! Wait {hours}h {mins}m."}
-
-        rev = t["daily_revenue"]
-        self.territories.update_one({"_id": key}, {"$set": {"last_collected": now}})
-        self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": rev}})
-        return {"ok": True, "msg": f"💰 **DISTRICT REVENUE COLLECTED!** Added **+{rev} coins** to **{gang['name']}** Vault from **{t['name']}**!"}
 
 
 # Global database instance
