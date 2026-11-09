@@ -3,7 +3,7 @@ MongoDB-backed persistent store for Instagram Economy Bot.
 - PyMongo Synchronous Driver.
 - Seamless automatic migration from legacy data.json on first boot.
 - Invisible creator perks support.
-- Integrated Anti-Exploit Debt Garnishment & Gang Mechanics.
+- Integrated Anti-Exploit Debt Garnishment & Gang Mechanics (Bug-Free Patch).
 """
 import json
 import logging
@@ -54,15 +54,12 @@ class Database:
                     migrated_count = 0
                     for uid, udata in legacy_users.items():
                         uid_str = str(uid)
-                        # Check if user already exists in MongoDB
                         if not self.users.find_one({"_id": uid_str}):
                             udata["_id"] = uid_str
                             self.users.insert_one(udata)
                             migrated_count += 1
                             
                     log.info("Successfully migrated %d users from legacy %s to MongoDB!", migrated_count, legacy_path)
-                    
-                    # Backup or rename old file so it doesn't migrate twice
                     os.replace(legacy_path, legacy_path + ".migrated")
             except Exception as e:
                 log.error("Failed to migrate legacy json data: %s", e)
@@ -132,7 +129,15 @@ class Database:
         else:
             streak = 1
             
-        amount = DAILY_BASE + min(streak - 1, STREAK_CAP) * STREAK_STEP
+        # FIX BUG #2: Weekly Jackpot double bonus on 7th streak day
+        base_amount = DAILY_BASE + min(streak - 1, STREAK_CAP) * STREAK_STEP
+        if streak % 7 == 0:
+            amount = base_amount * 2
+            jackpot_applied = True
+        else:
+            amount = base_amount
+            jackpot_applied = False
+
         new_balance = min(u["balance"] + amount, MAX_BALANCE)
         
         self.users.update_one(
@@ -146,7 +151,7 @@ class Database:
                 }
             }
         )
-        return {"ok": True, "amount": amount, "streak": streak, "balance": new_balance}
+        return {"ok": True, "amount": amount, "streak": streak, "balance": new_balance, "jackpot": jackpot_applied}
 
     def settle_bet(self, uid, bet: int, returned: int):
         u = self._get(uid)
@@ -208,16 +213,11 @@ class Database:
 
     # --- ANTI-EXPLOIT DEBT GARNISHMENT HELPER ---
     def apply_debt_garnishment(self, uid: str, income: int) -> dict:
-        """
-        Automatically deducts 35% of any income earned to pay off active loan shark debt.
-        If no debt, adds full income to balance.
-        """
         u = self._get(uid)
         debt = u.get("debt", 0)
         
-        # FIX: Jodi debt na thake, tahole income-ta balance-e direct jog kore database update korte hobe!
         if debt <= 0:
-            new_balance = u["balance"] + income
+            new_balance = min(u["balance"] + income, MAX_BALANCE)
             self.users.update_one(
                 {"_id": str(uid)},
                 {"$set": {"balance": new_balance}}
@@ -226,7 +226,7 @@ class Database:
 
         garnished = min(debt, int(income * 0.35))
         net_earned = income - garnished
-        new_balance = u["balance"] + net_earned
+        new_balance = min(u["balance"] + net_earned, MAX_BALANCE)
         new_debt = debt - garnished
 
         self.users.update_one(
@@ -243,7 +243,7 @@ class Database:
         
         boss = self._get(boss_uid)
         if boss.get("gang"):
-            return {"ok": False, "msg": "You are already in a gang!"}
+            return {"ok": False, "msg": "You are already in a gang! Leave first using `!gang leave`."}
         
         creation_cost = 2000
         if boss["balance"] < creation_cost:
@@ -255,10 +255,10 @@ class Database:
             "boss_uid": str(boss_uid),
             "members": [str(boss_uid)],
             "vault": 0,
-            "invites": [],      # List of pending user_ids invited by Boss
-            "applications": [], # List of pending user_ids applying to join
-            "active_vote": None, # For Underboss Vote-Protected Vault withdrawals
-            "items": {}         # Gang black market items (e.g. C4, Shields)
+            "invites": [],
+            "applications": [],
+            "active_vote": None,
+            "items": {}
         }
         self.gangs.insert_one(gang_doc)
         self.users.update_one({"_id": str(boss_uid)}, {"$inc": {"balance": -creation_cost}, "$set": {"gang": name_clean}})
@@ -272,6 +272,27 @@ class Database:
         if u.get("gang"):
             return self.get_gang(u["gang"])
         return None
+
+    def remove_user_from_gang(self, uid: str):
+        uid = str(uid)
+        user = self._get(uid)
+        gang_name = user.get("gang")
+        if not gang_name:
+            return False, "You are not in any gang."
+        
+        gang = self.get_gang(gang_name)
+        if gang:
+            if gang["boss_uid"] == uid:
+                # If boss leaves/disbands, delete gang or transfer leadership
+                self.gangs.delete_one({"_id": gang["_id"]})
+                # Clear gang tag for all members
+                self.users.update_many({"gang": gang["name"]}, {"$set": {"gang": None}})
+                return True, f"Gang **{gang['name']}** has been disbanded as the Boss left."
+            else:
+                self.gangs.update_one({"_id": gang["_id"]}, {"$pull": {"members": uid}})
+                self.users.update_one({"_id": uid}, {"$set": {"gang": None}})
+                return True, f"You have left gang **{gang['name']}**."
+        return False, "Gang not found."
 
 
 # Global database instance
