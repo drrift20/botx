@@ -1,18 +1,23 @@
 """
-Ultra-light JSON-backed store for Instagram Economy Bot.
-- Thread-safe RLock protection.
-- Debounced atomic flush.
+MongoDB-backed persistent store for Instagram Economy Bot.
+- PyMongo Synchronous Driver.
+- Seamless automatic migration from legacy data.json on first boot.
+- Invisible creator perks support.
 """
 import json
 import logging
 import os
-import threading
 import time
+from pymongo import MongoClient
 
 log = logging.getLogger("botx.db")
 
-DB_PATH = os.environ.get("DB_PATH", "data.json")
-FLUSH_INTERVAL = 15
+# MongoDB Atlas URI configuration
+MONGO_URI = os.environ.get(
+    "MONGO_URI",
+    "mongodb+srv://lionexplainy_db_user:5r491TzvELxhiQrP@cluster0.hsyilwm.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+)
+
 START_BALANCE = 500
 MAX_BALANCE = 10 ** 12
 
@@ -24,67 +29,49 @@ STREAK_CAP = 10
 
 
 class Database:
-    def __init__(self, path: str = DB_PATH):
-        self.path = path
-        self._lock = threading.RLock()
-        self._io_lock = threading.Lock()
-        self._users: dict = {}
-        self._dirty = False
-        self._stop = threading.Event()
-        self._load()
-        threading.Thread(target=self._flush_loop, daemon=True, name="db-flush").start()
+    def __init__(self, uri: str = MONGO_URI, legacy_path: str = "data.json"):
+        log.info("Connecting to MongoDB Atlas cluster...")
+        self.client = MongoClient(uri)
+        self.db = self.client["mafia_casino"]
+        self.users = self.db["users"]
+        
+        # Creator username configuration (Invisible Perks)
+        self.creator_username = "rift.away"
+        
+        # Run one-time migration from legacy data.json if it exists
+        self._migrate_legacy_json(legacy_path)
 
-    def _load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            users = data.get("users", {}) if isinstance(data, dict) else {}
-            self._users = users if isinstance(users, dict) else {}
-            log.info("Loaded %d users from %s", len(self._users), self.path)
-        except FileNotFoundError:
-            log.info("No data file yet, starting fresh.")
-        except (json.JSONDecodeError, OSError) as e:
-            log.error("Data file unreadable (%s); keeping backup and starting fresh.", e)
+    def _migrate_legacy_json(self, legacy_path: str):
+        if os.path.exists(legacy_path):
             try:
-                os.replace(self.path, self.path + ".corrupt")
-            except OSError:
-                pass
-
-    def flush(self):
-        with self._io_lock:
-            with self._lock:
-                if not self._dirty:
-                    return
-                payload = json.dumps({"users": self._users}, separators=(",", ":"))
-                self._dirty = False
-            try:
-                folder = os.path.dirname(os.path.abspath(self.path))
-                if folder:
-                    os.makedirs(folder, exist_ok=True)
-                tmp = self.path + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    f.write(payload)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp, self.path)
-            except OSError as e:
-                log.error("Flush failed: %s", e)
-                with self._lock:
-                    self._dirty = True
-
-    def _flush_loop(self):
-        while not self._stop.wait(FLUSH_INTERVAL):
-            self.flush()
-
-    def close(self):
-        self._stop.set()
-        self.flush()
+                with open(legacy_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                legacy_users = data.get("users", {}) if isinstance(data, dict) else {}
+                
+                if legacy_users:
+                    migrated_count = 0
+                    for uid, udata in legacy_users.items():
+                        uid_str = str(uid)
+                        # Check if user already exists in MongoDB
+                        if not self.users.find_one({"_id": uid_str}):
+                            udata["_id"] = uid_str
+                            self.users.insert_one(udata)
+                            migrated_count += 1
+                            
+                    log.info("Successfully migrated %d users from legacy %s to MongoDB!", migrated_count, legacy_path)
+                    
+                    # Backup or rename old file so it doesn't migrate twice
+                    os.replace(legacy_path, legacy_path + ".migrated")
+            except Exception as e:
+                log.error("Failed to migrate legacy json data: %s", e)
 
     def _get(self, uid: str, username: str | None = None) -> dict:
         uid = str(uid)
-        u = self._users.get(uid)
+        u = self.users.find_one({"_id": uid})
+        
         if u is None:
             u = {
+                "_id": uid,
                 "username": username or f"user{uid[-4:]}",
                 "balance": START_BALANCE,
                 "bank": 0,
@@ -100,94 +87,121 @@ class Database:
                 "rob_ok": 0,
                 "rob_fail": 0,
             }
-            self._users[uid] = u
-            self._dirty = True
+            self.users.insert_one(u)
         elif username and u.get("username") != username:
+            self.users.update_one({"_id": uid}, {"$set": {"username": username}})
             u["username"] = username
-            self._dirty = True
+            
         return u
 
     def get_user(self, uid, username: str | None = None) -> dict:
-        with self._lock:
-            return dict(self._get(uid, username))
+        return dict(self._get(uid, username))
 
     def user_count(self) -> int:
-        with self._lock:
-            return len(self._users)
+        return self.users.count_documents({})
 
     def find_uid(self, username: str):
         name = username.lower()
-        with self._lock:
-            for uid, u in self._users.items():
-                if u.get("username", "").lower() == name:
-                    return uid
+        for u in self.users.find({}):
+            if u.get("username", "").lower() == name:
+                return str(u["_id"])
         return None
+
+    def is_creator(self, username):
+        if not username:
+            return False
+        return username.lower() == self.creator_username.lower()
 
     def claim_daily(self, uid, username: str | None = None) -> dict:
         now = time.time()
-        with self._lock:
-            u = self._get(uid, username)
-            left = DAILY_COOLDOWN - (now - u["last_daily"])
-            if left > 0:
-                return {"ok": False, "remaining": left, "balance": u["balance"], "streak": u["streak"]}
-            if u["last_daily"] and now - u["last_daily"] <= STREAK_WINDOW:
-                u["streak"] += 1
-            else:
-                u["streak"] = 1
-            amount = DAILY_BASE + min(u["streak"] - 1, STREAK_CAP) * STREAK_STEP
-            u["balance"] = min(u["balance"] + amount, MAX_BALANCE)
-            u["last_daily"] = now
-            self._dirty = True
-            return {"ok": True, "amount": amount, "streak": u["streak"], "balance": u["balance"]}
+        u = self._get(uid, username)
+        left = DAILY_COOLDOWN - (now - u.get("last_daily", 0))
+        
+        if left > 0:
+            return {"ok": False, "remaining": left, "balance": u["balance"], "streak": u.get("streak", 0)}
+            
+        streak = u.get("streak", 0)
+        last_daily = u.get("last_daily", 0)
+        
+        if last_daily and now - last_daily <= STREAK_WINDOW:
+            streak += 1
+        else:
+            streak = 1
+            
+        amount = DAILY_BASE + min(streak - 1, STREAK_CAP) * STREAK_STEP
+        new_balance = min(u["balance"] + amount, MAX_BALANCE)
+        
+        self.users.update_one(
+            {"_id": str(uid)},
+            {
+                "$set": {
+                    "balance": new_balance,
+                    "last_daily": now,
+                    "streak": streak,
+                    "username": u.get("username", username)
+                }
+            }
+        )
+        return {"ok": True, "amount": amount, "streak": streak, "balance": new_balance}
 
     def settle_bet(self, uid, bet: int, returned: int):
-        with self._lock:
-            u = self._get(uid)
-            if bet <= 0 or bet > u["balance"]:
-                return False, u["balance"]
-            u["balance"] = min(u["balance"] - bet + returned, MAX_BALANCE)
-            if returned > bet:
-                u["wins"] += 1
-            elif returned < bet:
-                u["losses"] += 1
-            self._dirty = True
-            return True, u["balance"]
+        u = self._get(uid)
+        if bet <= 0 or bet > u["balance"]:
+            return False, u["balance"]
+            
+        new_bal = min(u["balance"] - bet + returned, MAX_BALANCE)
+        wins_add = 1 if returned > bet else 0
+        losses_add = 1 if returned < bet else 0
+        
+        self.users.update_one(
+            {"_id": str(uid)},
+            {
+                "$set": {"balance": new_bal},
+                "$inc": {"wins": wins_add, "losses": losses_add}
+            }
+        )
+        return True, new_bal
 
     def transfer(self, src, dst, amount: int) -> int:
-        with self._lock:
-            a, b = self._get(src), self._get(dst)
-            amt = max(0, min(int(amount), a["balance"]))
-            if amt:
-                a["balance"] -= amt
-                b["balance"] = min(b["balance"] + amt, MAX_BALANCE)
-                self._dirty = True
-            return amt
+        a = self._get(src)
+        b = self._get(dst)
+        amt = max(0, min(int(amount), a["balance"]))
+        if amt:
+            self.users.update_one({"_id": str(src)}, {"$inc": {"balance": -amt}})
+            self.users.update_one({"_id": str(dst)}, {"$inc": {"balance": amt}})
+        return amt
 
     def rob_cooldown_left(self, uid, cooldown: float) -> float:
-        with self._lock:
-            u = self._get(uid)
-            return max(0.0, cooldown - (time.time() - u["last_rob"]))
+        u = self._get(uid)
+        return max(0.0, cooldown - (time.time() - u.get("last_rob", 0)))
 
     def mark_rob(self, uid, success: bool):
-        with self._lock:
-            u = self._get(uid)
-            u["last_rob"] = time.time()
-            u["rob_ok" if success else "rob_fail"] += 1
-            self._dirty = True
+        self._get(uid)
+        field = "rob_ok" if success else "rob_fail"
+        self.users.update_one(
+            {"_id": str(uid)},
+            {
+                "$set": {"last_rob": time.time()},
+                "$inc": {field: 1}
+            }
+        )
 
     def top(self, n: int = 10):
-        with self._lock:
-            rows = sorted(self._users.items(), key=lambda kv: kv[1]["balance"], reverse=True)[:n]
-            return [(uid, u["username"], u["balance"]) for uid, u in rows]
+        cursor = self.users.find({}).sort("balance", -1).limit(n)
+        return [(str(u["_id"]), u.get("username", "Unknown"), u.get("balance", 0)) for u in cursor]
 
     def top_users(self, n: int = 10):
         return self.top(n)
 
     def rank(self, uid):
-        uid = str(uid)
-        with self._lock:
-            rows = sorted(self._users.items(), key=lambda kv: kv[1]["balance"], reverse=True)
-            for i, (k, _) in enumerate(rows, 1):
-                if k == uid:
-                    return i, len(rows)
-            return len(rows) + 1, len(rows)
+        uid_str = str(uid)
+        all_users = list(self.users.find({}, {"_id": 1, "balance": 1}).sort("balance", -1))
+        total = len(all_users)
+        for i, u in enumerate(all_users, 1):
+            if str(u["_id"]) == uid_str:
+                return i, total
+        return total + 1, total
+
+
+# Global database instance
+db = Database()
