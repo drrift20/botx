@@ -680,7 +680,6 @@ def cmd_gang(message, action=None, *args):
         if user["balance"] < amt and not database_inst.is_creator(message.user.username):
             return bot.reply(message, "❌ You don't have enough cash in hand!")
         
-        actual_amt = 0 if database_inst.is_creator(message.user.username) else amt
         if not database_inst.is_creator(message.user.username):
             database_inst.users.update_one({"_id": uid}, {"$inc": {"balance": -amt}})
         database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": amt}})
@@ -800,7 +799,7 @@ def cmd_gang(message, action=None, *args):
         if is_owner:
             success_prob = 0.99
         else:
-            success_prob = 0.60 if gang_items.get("bribe_pass", 0) > 0 else 0.30
+            success_prob = 0.60 if gang_items.get("bribe_pass", 0) > 0 else 0.35
 
         if gang_items.get("bribe_pass", 0) > 0 and not is_owner:
             gang_items["bribe_pass"] -= 1
@@ -812,18 +811,40 @@ def cmd_gang(message, action=None, *args):
         if is_owner or random.random() < success_prob:
             all_users = list(database_inst.users.find({}))
             gang_member_uids = set(gang["members"])
-            total_stolen = 0
             
-            for u in all_users:
-                if str(u["_id"]) not in gang_member_uids:
-                    b_vault = u.get("bank", 0)
-                    if b_vault > 100:
-                        stolen_amt = int(b_vault * 0.10)
-                        total_stolen += stolen_amt
-                        database_inst.users.update_one({"_id": u["_id"]}, {"$inc": {"bank": -stolen_amt}})
+            # 1. Collect all rival players outside this gang
+            rival_users = [u for u in all_users if str(u["_id"]) not in gang_member_uids]
             
+            if not rival_users:
+                return bot.reply(message, "❌ No rival players found in city to heist from!")
+            
+            # 2. Sum up total rival bank reserves
+            total_rival_bank = sum(u.get("bank", 0) for u in rival_users)
+            
+            if total_rival_bank <= 0:
+                return bot.reply(message, "❌ Rival player bank vaults are empty! Nothing to heist.")
+            
+            # 3. Take 20% of total rival bank pool as stolen amount
+            total_stolen = int(total_rival_bank * 0.20)
+            
+            if total_stolen <= 0:
+                return bot.reply(message, "❌ Rival bank reserves are too low to raid!")
+                
+            # 4. Equally deduct stolen amount from all rival players' bank accounts
+            per_player_deduction = total_stolen // len(rival_users)
+            
+            for r_user in rival_users:
+                curr_bank = r_user.get("bank", 0)
+                deduct_amt = min(curr_bank, per_player_deduction)
+                if deduct_amt > 0:
+                    database_inst.users.update_one({"_id": r_user["_id"]}, {"$inc": {"bank": -deduct_amt}})
+            
+            # 5. Add total stolen sum to Gang Vault
             database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": total_stolen}})
-            return bot.reply(message, f"🚨 **CENTRAL BANK RAID SUCCESSFUL!** Gang **{gang['name']}** looted **+{total_stolen} coins** from target player bank vaults!{pass_msg} 💰🔥")
+            
+            return bot.reply(message, f"🚨 **CENTRAL BANK RAID SUCCESSFUL!**\n"
+                                      f"Gang **{gang['name']}** looted **+{total_stolen} coins** (20% of rival bank reserves) into the vault!{pass_msg}\n"
+                                      f"*(Each of the {len(rival_users)} rival players lost ~{per_player_deduction} coins from their bank)* 💰🔥")
         else:
             fine = 500
             database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": -min(fine, gang["vault"])}})
@@ -908,7 +929,7 @@ def cmd_coinflip(message, bet=0, choice="heads"):
 
     is_owner = database_inst.is_creator(message.user.username)
     if is_owner:
-        outcome = choice  # Secret 100% win for creator (v.stray_)
+        outcome = choice
     else:
         outcome = random.choice(["heads", "tails"])
     
