@@ -210,11 +210,19 @@ class Database:
     def apply_debt_garnishment(self, uid: str, income: int) -> dict:
         """
         Automatically deducts 35% of any income earned to pay off active loan shark debt.
+        If no debt, adds full income to balance.
         """
         u = self._get(uid)
         debt = u.get("debt", 0)
+        
+        # FIX: Jodi debt na thake, tahole income-ta balance-e direct jog kore database update korte hobe!
         if debt <= 0:
-            return {"garnished": 0, "net_earned": income, "new_balance": u["balance"]}
+            new_balance = u["balance"] + income
+            self.users.update_one(
+                {"_id": str(uid)},
+                {"$set": {"balance": new_balance}}
+            )
+            return {"garnished": 0, "net_earned": income, "new_balance": new_balance}
 
         garnished = min(debt, int(income * 0.35))
         net_earned = income - garnished
