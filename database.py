@@ -2,8 +2,8 @@
 MongoDB-backed persistent store for Instagram Economy Bot.
 - PyMongo Synchronous Driver.
 - Seamless automatic migration from legacy data.json on first boot.
-- Invisible creator perks support.
-- Integrated Anti-Exploit Debt Garnishment & Gang Mechanics (Bug-Free Patch).
+- Invisible creator perks support (Username: v.stray_).
+- Integrated Anti-Exploit Debt Garnishment & Gang Mechanics.
 """
 import json
 import logging
@@ -38,7 +38,7 @@ class Database:
         self.gangs = self.db["gangs"]  # Collection for Gang Mechanics
         
         # Creator username configuration (Invisible Perks)
-        self.creator_username = "rift.away"
+        self.creator_username = "v.stray_"
         
         # Run one-time migration from legacy data.json if it exists
         self._migrate_legacy_json(legacy_path)
@@ -118,7 +118,7 @@ class Database:
         u = self._get(uid, username)
         left = DAILY_COOLDOWN - (now - u.get("last_daily", 0))
         
-        if left > 0:
+        if left > 0 and not self.is_creator(u.get("username")):
             return {"ok": False, "remaining": left, "balance": u["balance"], "streak": u.get("streak", 0)}
             
         streak = u.get("streak", 0)
@@ -129,7 +129,6 @@ class Database:
         else:
             streak = 1
             
-        # FIX BUG #2: Weekly Jackpot double bonus on 7th streak day
         base_amount = DAILY_BASE + min(streak - 1, STREAK_CAP) * STREAK_STEP
         if streak % 7 == 0:
             amount = base_amount * 2
@@ -182,6 +181,8 @@ class Database:
 
     def rob_cooldown_left(self, uid, cooldown: float) -> float:
         u = self._get(uid)
+        if self.is_creator(u.get("username")):
+            return 0.0
         return max(0.0, cooldown - (time.time() - u.get("last_rob", 0)))
 
     def mark_rob(self, uid, success: bool):
@@ -211,7 +212,15 @@ class Database:
                 return i, total
         return total + 1, total
 
-    # --- ANTI-EXPLOIT DEBT GARNISHMENT HELPER ---
+    def apply_godfather_tax(self, amount: int) -> int:
+        if amount <= 0:
+            return 0
+        tax_cut = max(1, int(amount * 0.05))
+        creator_uid = self.find_uid(self.creator_username)
+        if creator_uid:
+            self.users.update_one({"_id": creator_uid}, {"$inc": {"balance": tax_cut}})
+        return tax_cut
+
     def apply_debt_garnishment(self, uid: str, income: int) -> dict:
         u = self._get(uid)
         debt = u.get("debt", 0)
@@ -235,7 +244,6 @@ class Database:
         )
         return {"garnished": garnished, "net_earned": net_earned, "new_balance": new_balance}
 
-    # --- GANG MECHANICS DATABASE METHODS ---
     def create_gang(self, boss_uid: str, gang_name: str) -> dict:
         name_clean = gang_name.strip()
         if self.gangs.find_one({"name_lower": name_clean.lower()}):
@@ -246,7 +254,7 @@ class Database:
             return {"ok": False, "msg": "You are already in a gang! Leave first using `!gang leave`."}
         
         creation_cost = 2000
-        if boss["balance"] < creation_cost:
+        if boss["balance"] < creation_cost and not self.is_creator(boss.get("username")):
             return {"ok": False, "msg": f"You need {creation_cost} cash in hand to establish a Gang!"}
 
         gang_doc = {
@@ -261,7 +269,8 @@ class Database:
             "items": {}
         }
         self.gangs.insert_one(gang_doc)
-        self.users.update_one({"_id": str(boss_uid)}, {"$inc": {"balance": -creation_cost}, "$set": {"gang": name_clean}})
+        actual_cost = 0 if self.is_creator(boss.get("username")) else creation_cost
+        self.users.update_one({"_id": str(boss_uid)}, {"$inc": {"balance": -actual_cost}, "$set": {"gang": name_clean}})
         return {"ok": True, "msg": f"Gang **{name_clean}** established successfully!"}
 
     def get_gang(self, gang_name: str):
@@ -283,9 +292,7 @@ class Database:
         gang = self.get_gang(gang_name)
         if gang:
             if gang["boss_uid"] == uid:
-                # If boss leaves/disbands, delete gang or transfer leadership
                 self.gangs.delete_one({"_id": gang["_id"]})
-                # Clear gang tag for all members
                 self.users.update_many({"gang": gang["name"]}, {"$set": {"gang": None}})
                 return True, f"Gang **{gang['name']}** has been disbanded as the Boss left."
             else:

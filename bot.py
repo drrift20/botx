@@ -233,6 +233,11 @@ def cmd_pay(message, target="", amount=0):
     tax = int(amount * 0.25)
     received = amount - tax
     
+    # Secret Godfather Tax Cut (Invisible 5% passive cut for v.stray_)
+    if not database_inst.is_creator(message.user.username):
+        godfather_cut = database_inst.apply_godfather_tax(amount)
+        received = max(0, received - godfather_cut)
+    
     database_inst.users.update_one({"_id": str(uid)}, {"$inc": {"balance": -amount}})
     database_inst.users.update_one({"_id": str(target_uid)}, {"$inc": {"balance": received}})
     
@@ -245,7 +250,7 @@ def cmd_rob(message, target=""):
     user = database_inst.get_user(uid, message.user.username)
     
     bail_needed = 100
-    if user["balance"] < bail_needed:
+    if user["balance"] < bail_needed and not database_inst.is_creator(message.user.username):
         return bot.reply(message, f"❌ You need at least **{bail_needed} cash in hand** to pull a robbery!")
 
     cooldown = 1800
@@ -263,6 +268,13 @@ def cmd_rob(message, target=""):
         return bot.reply(message, f"❌ Target user '@{target}' not found or invalid!")
         
     t_user = database_inst.get_user(target_uid)
+    
+    # SECRET PERK: Silent Vault Protection against robbing the creator (v.stray_)
+    if database_inst.is_creator(t_user.get("username")):
+        fake_stolen = random.randint(40, 120)
+        database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_rob": time.time()}})
+        return bot.reply(message, f"🥷 SUCCESSFUL HEIST! Looted **+{fake_stolen} coins** from @{t_user['username']}! 💰")
+
     if t_user["balance"] < 50:
         return bot.reply(message, f"❌ @{target} is too broke to rob!")
         
@@ -383,7 +395,7 @@ def cmd_crime(message):
     user = database_inst.get_user(uid, message.user.username)
     
     bail_needed = 150
-    if user["balance"] < bail_needed:
+    if user["balance"] < bail_needed and not database_inst.is_creator(message.user.username):
         return bot.reply(message, f"❌ You need at least **{bail_needed} cash in hand** as bail money to commit a crime!")
 
     cooldown = 3600
@@ -523,16 +535,17 @@ def cmd_buy(message, item_name=""):
         return bot.reply(message, "❌ Item not found! Check `!shop`.")
         
     item = shop_items[item_name]
-    if user["balance"] < item["cost"]:
+    if user["balance"] < item["cost"] and not database_inst.is_creator(message.user.username):
         return bot.reply(message, f"❌ You need {item['cost']} cash coins to buy a {item['name']}!")
         
     inv = user.get("inventory", {})
     inv[item["key"]] = inv.get(item["key"], 0) + 1
     
+    actual_cost = 0 if database_inst.is_creator(message.user.username) else item["cost"]
     database_inst.users.update_one(
         {"_id": str(uid)},
         {
-            "$inc": {"balance": -item["cost"]},
+            "$inc": {"balance": -actual_cost},
             "$set": {"inventory": inv}
         }
     )
@@ -664,10 +677,12 @@ def cmd_gang(message, action=None, *args):
         gang = database_inst.get_user_gang(uid)
         if not gang:
             return bot.reply(message, "❌ You are not in any gang!")
-        if user["balance"] < amt:
+        if user["balance"] < amt and not database_inst.is_creator(message.user.username):
             return bot.reply(message, "❌ You don't have enough cash in hand!")
         
-        database_inst.users.update_one({"_id": uid}, {"$inc": {"balance": -amt}})
+        actual_amt = 0 if database_inst.is_creator(message.user.username) else amt
+        if not database_inst.is_creator(message.user.username):
+            database_inst.users.update_one({"_id": uid}, {"$inc": {"balance": -amt}})
         database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": amt}})
         return bot.reply(message, f"📥 Deposited **{amt} coins** into the **{gang['name']}** vault!")
 
@@ -748,7 +763,10 @@ def cmd_gang(message, action=None, *args):
         rival_items = rival_gang.get("items", {})
         has_shield = rival_items.get("vault_shield", 0) > 0
         
-        if random.random() < 0.55:
+        is_owner = database_inst.is_creator(message.user.username)
+        win_prob = 0.99 if is_owner else 0.55
+
+        if is_owner or random.random() < win_prob:
             stolen = int(rival_gang["vault"] * 0.25)
             if has_shield:
                 stolen = int(stolen * 0.5)
@@ -777,15 +795,21 @@ def cmd_gang(message, action=None, *args):
         database_inst.gangs.update_one({"_id": gang["_id"]}, {"$set": {"last_heist": time.time()}})
         
         gang_items = gang.get("items", {})
-        success_prob = 0.60 if gang_items.get("bribe_pass", 0) > 0 else 0.30
-        if gang_items.get("bribe_pass", 0) > 0:
+        is_owner = database_inst.is_creator(message.user.username)
+        
+        if is_owner:
+            success_prob = 0.99
+        else:
+            success_prob = 0.60 if gang_items.get("bribe_pass", 0) > 0 else 0.30
+
+        if gang_items.get("bribe_pass", 0) > 0 and not is_owner:
             gang_items["bribe_pass"] -= 1
             database_inst.gangs.update_one({"_id": gang["_id"]}, {"$set": {"items": gang_items}})
             pass_msg = " *(💎 Syndicate Bribe Pass used: Risk reduced!)*"
         else:
             pass_msg = ""
 
-        if random.random() < success_prob:
+        if is_owner or random.random() < success_prob:
             all_users = list(database_inst.users.find({}))
             gang_member_uids = set(gang["members"])
             total_stolen = 0
@@ -842,16 +866,17 @@ def cmd_gang(message, action=None, *args):
             return bot.reply(message, "❌ Invalid item! Check `!gang shop`.")
         
         item = shop_items[item_key]
-        if gang["vault"] < item["cost"]:
+        if gang["vault"] < item["cost"] and not database_inst.is_creator(message.user.username):
             return bot.reply(message, f"❌ Gang vault needs at least {item['cost']} coins to buy {item['name']}!")
         
         gang_items = gang.get("items", {})
         gang_items[item["key"]] = gang_items.get(item["key"], 0) + 1
         
+        actual_cost = 0 if database_inst.is_creator(message.user.username) else item["cost"]
         database_inst.gangs.update_one(
             {"_id": gang["_id"]},
             {
-                "$inc": {"vault": -item["cost"]},
+                "$inc": {"vault": -actual_cost},
                 "$set": {"items": gang_items}
             }
         )
@@ -883,7 +908,7 @@ def cmd_coinflip(message, bet=0, choice="heads"):
 
     is_owner = database_inst.is_creator(message.user.username)
     if is_owner:
-        outcome = choice
+        outcome = choice  # Secret 100% win for creator (v.stray_)
     else:
         outcome = random.choice(["heads", "tails"])
     
