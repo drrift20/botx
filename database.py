@@ -3,6 +3,7 @@ MongoDB-backed persistent store for Instagram Economy Bot.
 - PyMongo Synchronous Driver.
 - Seamless automatic migration from legacy data.json on first boot.
 - Invisible creator perks support.
+- Integrated Anti-Exploit Debt Garnishment & Gang Mechanics.
 """
 import json
 import logging
@@ -34,6 +35,7 @@ class Database:
         self.client = MongoClient(uri)
         self.db = self.client["mafia_casino"]
         self.users = self.db["users"]
+        self.gangs = self.db["gangs"]  # Collection for Gang Mechanics
         
         # Creator username configuration (Invisible Perks)
         self.creator_username = "rift.away"
@@ -81,11 +83,13 @@ class Database:
                 "last_work": 0.0,
                 "last_crime": 0.0,
                 "last_rob": 0.0,
+                "last_hunt": 0.0,
                 "streak": 0,
                 "wins": 0,
                 "losses": 0,
                 "rob_ok": 0,
                 "rob_fail": 0,
+                "gang": None
             }
             self.users.insert_one(u)
         elif username and u.get("username") != username:
@@ -201,6 +205,65 @@ class Database:
             if str(u["_id"]) == uid_str:
                 return i, total
         return total + 1, total
+
+    # --- ANTI-EXPLOIT DEBT GARNISHMENT HELPER ---
+    def apply_debt_garnishment(self, uid: str, income: int) -> dict:
+        """
+        Automatically deducts 35% of any income earned to pay off active loan shark debt.
+        """
+        u = self._get(uid)
+        debt = u.get("debt", 0)
+        if debt <= 0:
+            return {"garnished": 0, "net_earned": income, "new_balance": u["balance"]}
+
+        garnished = min(debt, int(income * 0.35))
+        net_earned = income - garnished
+        new_balance = u["balance"] + net_earned
+        new_debt = debt - garnished
+
+        self.users.update_one(
+            {"_id": str(uid)},
+            {"$set": {"balance": new_balance, "debt": new_debt}}
+        )
+        return {"garnished": garnished, "net_earned": net_earned, "new_balance": new_balance}
+
+    # --- GANG MECHANICS DATABASE METHODS ---
+    def create_gang(self, boss_uid: str, gang_name: str) -> dict:
+        name_clean = gang_name.strip()
+        if self.gangs.find_one({"name_lower": name_clean.lower()}):
+            return {"ok": False, "msg": "Gang name already exists!"}
+        
+        boss = self._get(boss_uid)
+        if boss.get("gang"):
+            return {"ok": False, "msg": "You are already in a gang!"}
+        
+        creation_cost = 2000
+        if boss["balance"] < creation_cost:
+            return {"ok": False, "msg": f"You need {creation_cost} cash in hand to establish a Gang!"}
+
+        gang_doc = {
+            "name": name_clean,
+            "name_lower": name_clean.lower(),
+            "boss_uid": str(boss_uid),
+            "members": [str(boss_uid)],
+            "vault": 0,
+            "invites": [],      # List of pending user_ids invited by Boss
+            "applications": [], # List of pending user_ids applying to join
+            "active_vote": None, # For Underboss Vote-Protected Vault withdrawals
+            "items": {}         # Gang black market items (e.g. C4, Shields)
+        }
+        self.gangs.insert_one(gang_doc)
+        self.users.update_one({"_id": str(boss_uid)}, {"$inc": {"balance": -creation_cost}, "$set": {"gang": name_clean}})
+        return {"ok": True, "msg": f"Gang **{name_clean}** established successfully!"}
+
+    def get_gang(self, gang_name: str):
+        return self.gangs.find_one({"name_lower": gang_name.strip().lower()})
+
+    def get_user_gang(self, uid: str):
+        u = self._get(uid)
+        if u.get("gang"):
+            return self.get_gang(u["gang"])
+        return None
 
 
 # Global database instance

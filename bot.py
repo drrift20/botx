@@ -137,15 +137,21 @@ def cmd_help(message):
                       "- `!work` - Do a gig (30m cooldown)\n"
                       "- `!crime` - High-risk heist (Requires 150 bail cash)\n"
                       "- `!rob <user>` - Mug a player (Requires 100 grease money)\n"
-                      "- `!hunt <user>` - Hunt down overdue debtors for big bounties! 🎯\n\n"
+                      "- `!hunt <user>` - Hunt down overdue debtors for bounties! 🎯\n\n"
+                      "🏛️ **Gang Mechanics:**\n"
+                      "- `!gang create <name>` - Establish a syndicate gang (2000 coins)\n"
+                      "- `!gang invite <user>` / `!gang apply <name>` - Recruitment\n"
+                      "- `!gang accept` / `!gang decline` - Join gang\n"
+                      "- `!gang deposit <amt>` / `!gang vault` - Shared treasury\n"
+                      "- `!gang withdraw <amt>` - Request vault funds (Underboss Vote)\n"
+                      "- `!gang vote <yes/no>` - Vote on boss withdrawal requests\n"
+                      "- `!gang heist` - Raid Central Bank (Risk stealing from all players!)\n"
+                      "- `!gang war <rival>` - Attack rival gang vault\n"
+                      "- `!gang lb` - Weekly Gang Leaderboard\n\n"
                       "🏦 **Bank & Black Market:**\n"
-                      "- `!bank` - Vault & Syndicate loans (Automatic partial debt garnishment)\n"
-                      "- `!shop` - View gear\n"
-                      "- `!buy <item>` - Buy black market items\n\n"
-                      "🎲 **Gambling & Fun:**\n"
-                      "- `!coinflip <amt/all/half> <heads/tails>` - Double or nothing!\n"
-                      "- `!roll` - Roll 1-100\n"
-                      "- `!ping` - Status check")
+                      "- `!bank` - Vault & Syndicate loans\n"
+                      "- `!shop` & `!gangshop` - Black Market Gear\n"
+                      "- `!buy <item>` - Purchase items")
 
 @bot.command("ping")
 def cmd_ping(message):
@@ -159,8 +165,10 @@ def cmd_profile(message):
     user = database_inst.get_user(uid, message.user.username)
     inv = user.get("inventory", {})
     inv_str = ", ".join([f"{k.replace('_', ' ').title()}: {v}" for k, v in inv.items() if v > 0]) or "Empty 🎒"
+    gang_name = user.get("gang", "None 🚫")
     net_worth = user['balance'] + user['bank'] - user['debt']
     bot.reply(message, f"👤 **MAFIA PROFILE: {message.user.username}**\n"
+                      f"- Gang: 🛡️ {gang_name}\n"
                       f"- Cash in Hand: 💵 {user['balance']} coins\n"
                       f"- Bank Vault: 🏦 {user['bank']} coins\n"
                       f"- Debt: 💳 {user['debt']} coins\n"
@@ -210,7 +218,6 @@ def cmd_pay(message, target="", amount=0):
     if target_uid == uid:
         return bot.reply(message, "❌ You can't pay yourself!")
         
-    # ANTI-EXPLOIT: 25% Syndicate Tax on Transfers to stop alt-farming
     tax = int(amount * 0.25)
     received = amount - tax
     
@@ -225,16 +232,15 @@ def cmd_rob(message, target=""):
     database_inst = db.db if hasattr(db, "db") else db.Database()
     user = database_inst.get_user(uid, message.user.username)
     
-    # ANTI-EXPLOIT: Minimum grease money required in hand
     bail_needed = 100
     if user["balance"] < bail_needed:
-        return bot.reply(message, f"❌ You need at least **{bail_needed} cash in hand** to pull a robbery! Clear your bank to carry cash.")
+        return bot.reply(message, f"❌ You need at least **{bail_needed} cash in hand** to pull a robbery!")
 
-    cooldown = 1800 # 30 mins
+    cooldown = 1800
     left = cooldown - (time.time() - user.get("last_rob", 0))
     if left > 0:
         mins = int(left // 60)
-        return bot.reply(message, f"⏳ You are hiding from heat! Wait another {mins} minutes before mugging someone.")
+        return bot.reply(message, f"⏳ You are hiding from heat! Wait another {mins} minutes.")
         
     target = target.lstrip("@").lower()
     if not target:
@@ -246,21 +252,20 @@ def cmd_rob(message, target=""):
         
     t_user = database_inst.get_user(target_uid)
     if t_user["balance"] < 50:
-        return bot.reply(message, f"❌ @{target} is too broke to rob! (Under 50 cash)")
+        return bot.reply(message, f"❌ @{target} is too broke to rob!")
         
     database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_rob": time.time()}})
     
     if random.random() < 0.40:
         stolen = random.randint(30, min(300, t_user["balance"]))
         database_inst.users.update_one({"_id": str(target_uid)}, {"$inc": {"balance": -stolen}})
-        
         earned_info = database_inst.apply_debt_garnishment(uid, stolen)
-        bot.reply(message, f"🥷 SUCCESSFUL HEIST! You ambushed @{target} and looted **+{stolen} coins**! *(Debt paid: {earned_info['garnished']})* 💰")
+        bot.reply(message, f"🥷 SUCCESSFUL HEIST! Looted **+{stolen} coins** from @{target}! *(Debt paid: {earned_info['garnished']})* 💰")
     else:
         fine = random.randint(50, 150)
         new_bal = max(0, user["balance"] - fine)
         database_inst.users.update_one({"_id": str(uid)}, {"$set": {"balance": new_bal}})
-        bot.reply(message, f"🚨 CAUGHT RED-HANDED! @{target} beat you up! Paid a police fine of **-{fine} coins**! 🏥")
+        bot.reply(message, f"🚨 CAUGHT! Paid police fine of **-{fine} coins**! 🏥")
 
 @bot.command("hunt")
 def cmd_hunt(message, target=""):
@@ -270,39 +275,35 @@ def cmd_hunt(message, target=""):
     
     target = target.lstrip("@").lower()
     if not target:
-        return bot.reply(message, "❌ Usage: `!hunt <username>` (Track down overdue debtors for Syndicate bounty!)")
+        return bot.reply(message, "❌ Usage: `!hunt <username>`")
         
     target_uid = database_inst.find_uid(target)
     if not target_uid or target_uid == uid:
         return bot.reply(message, f"❌ Target user '@{target}' not found or invalid!")
         
     t_user = database_inst.get_user(target_uid)
-    
-    # Bounty target must have overdue debt (> 500 debt)
     if t_user.get("debt", 0) <= 500:
-        return bot.reply(message, f"❌ @{target} has clean standing or doesn't owe enough debt to place a bounty!")
+        return bot.reply(message, f"❌ @{target} doesn't owe enough debt for a bounty hunt!")
         
-    cooldown = 1200 # 20 mins
+    cooldown = 1200
     left = cooldown - (time.time() - user.get("last_hunt", 0))
     if left > 0:
         mins = int(left // 60)
-        return bot.reply(message, f"⏳ Weapons cooling down! Wait another {mins} minutes before your next hunt.")
+        return bot.reply(message, f"⏳ Weapons cooling down! Wait {mins} minutes.")
 
     database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_hunt": time.time()}})
     
     if random.random() < 0.65:
         loot_seized = min(200, t_user.get("balance", 0))
-        house_reward = 300 # Syndicate Bounty payout
+        house_reward = 300
         total_payout = loot_seized + house_reward
-        
         database_inst.users.update_one({"_id": str(target_uid)}, {"$inc": {"balance": -loot_seized, "debt": 100}})
-        
         earned_info = database_inst.apply_debt_garnishment(uid, total_payout)
-        bot.reply(message, f"🎯 **BOUNTY COLLECTED!** You tracked down deadbeat @{target}! Seized their cash & claimed Syndicate reward: **+{total_payout} coins**! *(Debt paid: {earned_info['garnished']})* 💰🔥")
+        bot.reply(message, f"🎯 **BOUNTY COLLECTED!** Seized cash & claimed **+{total_payout} coins**! *(Debt paid: {earned_info['garnished']})* 🔥")
     else:
         fine = 100
         database_inst.users.update_one({"_id": str(uid)}, {"$inc": {"balance": -fine, "debt": fine}})
-        bot.reply(message, f"💥 **HUNT FAILED!** @{target}'s goons ambushed you! Medical penalty of **-{fine} coins** added to your debt! 🏥💀")
+        bot.reply(message, f"💥 **HUNT FAILED!** Paid medical penalty of **-{fine} coins** added to debt! 💀")
 
 @bot.command("daily")
 def cmd_daily(message):
@@ -315,7 +316,7 @@ def cmd_daily(message):
         return bot.reply(message, f"⏳ Daily already claimed! Come back in {hours}h {mins}m.")
     
     earned_info = database_inst.apply_debt_garnishment(uid, res['amount'])
-    bot.reply(message, f"🎁 Daily bonus claimed! **+{res['amount']} coins** (Streak: 🔥 {res['streak']} days). *(Debt paid: {earned_info['garnished']})* Cash: **{earned_info['new_balance']}**.")
+    bot.reply(message, f"🎁 Daily claimed! **+{res['amount']} coins** (Streak: 🔥 {res['streak']} days). *(Debt paid: {earned_info['garnished']})* Cash: **{earned_info['new_balance']}**.")
 
 @bot.command("work")
 def cmd_work(message):
@@ -349,7 +350,7 @@ def cmd_work(message):
     database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_work": time.time(), "inventory": inv}})
     
     earned_info = database_inst.apply_debt_garnishment(uid, earned)
-    bot.reply(message, f"{pill_msg}💼 You finished {job_desc} and earned **+{earned} coins**! *(Debt paid: {earned_info['garnished']})* Cash: **{earned_info['new_balance']}**.")
+    bot.reply(message, f"{pill_msg}💼 Finished {job_desc} and earned **+{earned} coins**! *(Debt paid: {earned_info['garnished']})* Cash: **{earned_info['new_balance']}**.")
 
 @bot.command("crime")
 def cmd_crime(message):
@@ -357,7 +358,6 @@ def cmd_crime(message):
     database_inst = db.db if hasattr(db, "db") else db.Database()
     user = database_inst.get_user(uid, message.user.username)
     
-    # ANTI-EXPLOIT: Minimum cash required in hand for bail money
     bail_needed = 150
     if user["balance"] < bail_needed:
         return bot.reply(message, f"❌ You need at least **{bail_needed} cash in hand** as bail money to commit a crime!")
@@ -398,18 +398,18 @@ def cmd_crime(message):
         if inv.get("police_shield", 0) > 0:
             inv["police_shield"] -= 1
             database_inst.users.update_one({"_id": str(uid)}, {"$set": {"inventory": inv}})
-            msg = f"🛡️ BUSTED BY COPS, BUT SAVED! Your **Police Shield** deflected the arrest while {crime_name}!"
+            msg = f"🛡️ SAVED! Your **Police Shield** deflected the arrest!"
         else:
             lost = random.randint(min_f, max_f)
             current_bal = user["balance"]
             if current_bal >= lost:
                 new_bal = current_bal - lost
                 database_inst.users.update_one({"_id": str(uid)}, {"$set": {"balance": new_bal}})
-                msg = f"🚓 ARRESTED! Failed while {crime_name} and paid a fine of **-{lost} coins**! 💀"
+                msg = f"🚓 ARRESTED! Paid a fine of **-{lost} coins**! 💀"
             else:
                 shortage = lost - current_bal
                 database_inst.users.update_one({"_id": str(uid)}, {"$set": {"balance": 0}, "$inc": {"debt": shortage}})
-                msg = f"🚓 ARRESTED & BANKRUPT! Shortage of **{shortage} coins** added to your **Loan Shark Debt**! 💳💀"
+                msg = f"🚓 ARRESTED & BANKRUPT! Shortage of **{shortage} coins** added to Loan Shark Debt! 💳💀"
 
     bot.reply(message, msg)
 
@@ -425,7 +425,7 @@ def cmd_bank(message, action=None, amount=0):
         amount = 0
 
     if not action:
-        return bot.reply(message, f"🏦 **MAFIA CENTRAL BANK**\n- Cash: {user['balance']} coins\n- Vault: {user['bank']} coins\n- Debt (25% interest): {user['debt']} coins\n\nUsage: `!bank deposit <amt>`, `!bank withdraw <amt>`, `!bank loan <amt>`, `!bank repay <amt>`")
+        return bot.reply(message, f"🏦 **MAFIA CENTRAL BANK**\n- Cash: {user['balance']} coins\n- Vault: {user['bank']} coins\n- Debt: {user['debt']} coins\n\nUsage: `!bank deposit <amt>`, `!bank withdraw <amt>`, `!bank loan <amt>`, `!bank repay <amt>`")
     
     action = action.lower()
     u = database_inst.get_user(uid)
@@ -453,7 +453,7 @@ def cmd_bank(message, action=None, amount=0):
             "$inc": {"balance": amount},
             "$set": {"debt": total_debt_with_juice, "loan_time": time.time()}
         })
-        bot.reply(message, f"💸 Loan approved: **{amount} coins**! Total debt with juice: **{total_debt_with_juice} coins**. Pay back before bounty hunters target you! 😈")
+        bot.reply(message, f"💸 Loan approved: **{amount} coins**! Total debt with juice: **{total_debt_with_juice} coins**.")
         
     elif action == "repay":
         if u["debt"] <= 0:
@@ -465,9 +465,9 @@ def cmd_bank(message, action=None, amount=0):
 @bot.command("shop")
 def cmd_shop(message):
     bot.reply(message, "🛒 **BLACK MARKET SHOP**\n\n"
-                      "1. `!buy potion` (300 coins) - Luck Potion (Boosts crime success to 70%)\n"
-                      "2. `!buy shield` (500 coins) - Police Shield (Saves you from 1 police fine)\n"
-                      "3. `!buy pill` (1000 coins) - Jackpot Pill (Doubles next work/crime payout)\n\n"
+                      "1. `!buy potion` (300 coins) - Luck Potion (70% crime success)\n"
+                      "2. `!buy shield` (500 coins) - Police Shield (Saves 1 fine)\n"
+                      "3. `!buy pill` (1000 coins) - Jackpot Pill (Doubles next payout)\n\n"
                       "Type `!buy <item>` to grab gear!")
 
 @bot.command("buy")
@@ -493,8 +493,7 @@ def cmd_buy(message, item_name=""):
     if user["balance"] < item["cost"]:
         return bot.reply(message, f"❌ You need {item['cost']} cash coins to buy a {item['name']}!")
         
-    u = database_inst.get_user(uid)
-    inv = u.get("inventory", {})
+    inv = user.get("inventory", {})
     inv[item["key"]] = inv.get(item["key"], 0) + 1
     
     database_inst.users.update_one(
@@ -506,6 +505,197 @@ def cmd_buy(message, item_name=""):
     )
     total_qty = inv[item['key']]
     bot.reply(message, f"🧪 Purchased **{item['name']}**! You now own {total_qty}.")
+
+# --- GANG MECHANICS COMMANDS ---
+
+@bot.command("gang")
+def cmd_gang(message, action=None, *args):
+    uid = str(message.user.pk)
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    user = database_inst.get_user(uid, message.user.username)
+    
+    if not action:
+        return bot.reply(message, "🛡️ **SYNDICATE GANG SYSTEM**\n\n"
+                                 "- `!gang create <name>` (Cost: 2000 coins)\n"
+                                 "- `!gang invite <username>` (Boss only)\n"
+                                 "- `!gang apply <name>` (Request to join)\n"
+                                 "- `!gang accept` / `!gang decline`\n"
+                                 "- `!gang vault` - View shared treasury\n"
+                                 "- `!gang deposit <amt>` - Add funds\n"
+                                 "- `!gang withdraw <amt>` - Request vault funds (Underboss Vote)\n"
+                                 "- `!gang vote <yes/no>` - Vote on boss withdrawal\n"
+                                 "- `!gang heist` - Raid Central Bank\n"
+                                 "- `!gang war <rival>` - Attack rival gang\n"
+                                 "- `!gang lb` - Weekly Gang Leaderboard\n"
+                                 "- `!gang shop` - Gang black market")
+
+    action = action.lower()
+    
+    if action == "create":
+        if not args:
+            return bot.reply(message, "❌ Usage: `!gang create <gang_name>`")
+        gang_name = args[0]
+        res = database_inst.create_gang(uid, gang_name)
+        return bot.reply(message, f"🛡️ {res['msg']}")
+
+    elif action == "invite":
+        if not args:
+            return bot.reply(message, "❌ Usage: `!gang invite <username>`")
+        gang = database_inst.get_user_gang(uid)
+        if not gang or gang["boss_uid"] != uid:
+            return bot.reply(message, "❌ Only the Gang Boss (Don) can send invites!")
+        target_uname = args[0].lstrip("@").lower()
+        target_uid = database_inst.find_uid(target_uname)
+        if not target_uid:
+            return bot.reply(message, f"❌ User '@{target_uname}' not found!")
+        
+        database_inst.gangs.update_one({"_id": gang["_id"]}, {"$addToSet": {"invites": target_uid}})
+        return bot.reply(message, f"💌 Invitation sent to @{target_uname}! They can type `!gang accept` to join.")
+
+    elif action == "apply":
+        if not args:
+            return bot.reply(message, "❌ Usage: `!gang apply <gang_name>`")
+        gang_name = args[0]
+        gang = database_inst.get_gang(gang_name)
+        if not gang:
+            return bot.reply(message, f"❌ Gang '{gang_name}' not found!")
+        if user.get("gang"):
+            return bot.reply(message, "❌ You are already in a gang! Leave first.")
+        
+        database_inst.gangs.update_one({"_id": gang["_id"]}, {"$addToSet": {"applications": uid}})
+        return bot.reply(message, f"📝 Application submitted to **{gang['name']}**! Waiting for Don's review.")
+
+    elif action == "accept":
+        gang = database_inst.gangs.find_one({"$or": [{"invites": uid}, {"boss_uid": uid}]})
+        if not gang:
+            # Check if boss accepting application
+            user_gang = database_inst.get_user_gang(uid)
+            if user_gang and user_gang["boss_uid"] == uid and user_gang.get("applications"):
+                applicant_uid = user_gang["applications"][0]
+                app_user = database_inst.get_user(applicant_uid)
+                database_inst.gangs.update_one({"_id": user_gang["_id"]}, {"$pull": {"applications": applicant_uid}, "$addToSet": {"members": applicant_uid}})
+                database_inst.users.update_one({"_id": applicant_uid}, {"$set": {"gang": user_gang["name"]}})
+                return bot.reply(message, f"✅ Don accepted @{app_user['username']} into the gang!")
+            return bot.reply(message, "❌ No pending invites or applications to accept!")
+        
+        if uid in gang.get("invites", []):
+            database_inst.gangs.update_one({"_id": gang["_id"]}, {"$pull": {"invites": uid}, "$addToSet": {"members": uid}})
+            database_inst.users.update_one({"_id": uid}, {"$set": {"gang": gang["name"]}})
+            return bot.reply(message, f"🎉 You successfully joined gang **{gang['name']}**!")
+
+    elif action == "vault":
+        gang = database_inst.get_user_gang(uid)
+        if not gang:
+            return bot.reply(message, "❌ You are not in any gang!")
+        return bot.reply(message, f"🏦 **{gang['name']} TREASURY**\n- Vault Balance: 💵 {gang['vault']} coins\n- Members: {len(gang['members'])}")
+
+    elif action == "deposit":
+        if not args:
+            return bot.reply(message, "❌ Usage: `!gang deposit <amount>`")
+        try:
+            amt = int(args[0])
+        except ValueError:
+            return bot.reply(message, "❌ Invalid amount!")
+        gang = database_inst.get_user_gang(uid)
+        if not gang:
+            return bot.reply(message, "❌ You are not in any gang!")
+        if user["balance"] < amt:
+            return bot.reply(message, "❌ You don't have enough cash in hand!")
+        
+        database_inst.users.update_one({"_id": uid}, {"$inc": {"balance": -amt}})
+        database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": amt}})
+        return bot.reply(message, f"📥 Deposited **{amt} coins** into the **{gang['name']}** vault!")
+
+    elif action == "withdraw":
+        if not args:
+            return bot.reply(message, "❌ Usage: `!gang withdraw <amount>`")
+        try:
+            amt = int(args[0])
+        except ValueError:
+            return bot.reply(message, "❌ Invalid amount!")
+        gang = database_inst.get_user_gang(uid)
+        if not gang:
+            return bot.reply(message, "❌ You are not in any gang!")
+        if gang["boss_uid"] != uid:
+            return bot.reply(message, "❌ Only the Gang Boss can request withdrawals!")
+        if amt > gang["vault"]:
+            return bot.reply(message, "❌ Gang vault doesn't have that much!")
+        
+        # Underboss Vote System
+        vote_data = {"amount": amt, "yes": [uid], "no": [], "voted": [uid]}
+        database_inst.gangs.update_one({"_id": gang["_id"]}, {"$set": {"active_vote": vote_data}})
+        return bot.reply(message, f"🗳️ **DON WITHDRAWAL REQUEST:** Boss @{user['username']} requested **{amt} coins** from vault!\nMembers must type `!gang vote yes` or `!gang vote no`.")
+
+    elif action == "vote":
+        if not args:
+            return bot.reply(message, "❌ Usage: `!gang vote <yes/no>`")
+        vote_val = args[0].lower()
+        if vote_val not in ["yes", "no"]:
+            return bot.reply(message, "❌ Choose `yes` or `no`.")
+        gang = database_inst.get_user_gang(uid)
+        if not gang or not gang.get("active_vote"):
+            return bot.reply(message, "❌ There is no active vault withdrawal vote right now!")
+        
+        vote = gang["active_vote"]
+        if uid in vote["voted"]:
+            return bot.reply(message, "❌ You have already voted!")
+        
+        vote["voted"].append(uid)
+        vote[vote_val].append(uid)
+        
+        total_members = len(gang["members"])
+        yes_votes = len(vote["yes"])
+        
+        if yes_votes >= (total_members // 2) + 1:
+            # Vote Passed! Transfer coins to boss
+            amt = vote["amount"]
+            database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": -amt}, "$set": {"active_vote": None}})
+            database_inst.users.update_one({"_id": gang["boss_uid"]}, {"$inc": {"balance": amt}})
+            return bot.reply(message, f"✅ **VOTE PASSED!** Withdrawal of {amt} coins approved and transferred to Boss!")
+        elif len(vote["voted"]) >= total_members:
+            database_inst.gangs.update_one({"_id": gang["_id"]}, {"$set": {"active_vote": None}})
+            return bot.reply(message, f"❌ **VOTE FAILED!** Majority reached 'no' or time expired.")
+        else:
+            database_inst.gangs.update_one({"_id": gang["_id"]}, {"$set": {"active_vote": vote}})
+            return bot.reply(message, f"🗳️ Vote recorded ({yes_votes}/{total_members} Yes). Keep voting!")
+
+    elif action == "heist":
+        gang = database_inst.get_user_gang(uid)
+        if not gang or gang["boss_uid"] != uid:
+            return bot.reply(message, "❌ Only the Gang Boss can initiate a Central Bank Heist!")
+        
+        cooldown = 14400 # 4 hours
+        if time.time() - gang.get("last_heist", 0) < cooldown:
+            return bot.reply(message, "⏳ Gang needs to lay low! Heist cooldown active.")
+        
+        database_inst.gangs.update_one({"_id": gang["_id"]}, {"$set": {"last_heist": time.time()}})
+        
+        if random.random() < 0.30:
+            # Successful Central Bank Heist! Steal 10% from all players' bank vaults across server
+            all_users = list(database_inst.users.find({}))
+            total_stolen = 0
+            for u in all_users:
+                b_vault = u.get("bank", 0)
+                if b_vault > 100:
+                    stolen_amt = int(b_vault * 0.10)
+                    total_stolen += stolen_amt
+                    database_inst.users.update_one({"_id": u["_id"]}, {"$inc": {"bank": -stolen_amt}})
+            
+            database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": total_stolen}})
+            return bot.reply(message, f"🚨 **CENTRAL BANK RAID SUCCESSFUL!** Gang @{user['username']}'s syndicate looted **+{total_stolen} coins** from player bank vaults across the city! 💰🔥")
+        else:
+            fine = 500
+            database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": -min(fine, gang["vault"])}})
+            return bot.reply(message, f"💥 **HEIST FAILED!** Police ambushed the bank vault! Gang vault fined **-{fine} coins**! 🚓💀")
+
+    elif action == "lb":
+        all_gangs = list(database_inst.gangs.find({}).sort("vault", -1).limit(5))
+        if not all_gangs:
+            return bot.reply(message, "📊 No gangs established yet!")
+        lb_txt = "🏆 **SYNDICATE GANG LEADERBOARD**\n"
+        for i, g in enumerate(all_gangs, 1):
+            lb_txt += f"{i}. **{g['name']}** — 🏦 {g['vault']} vault coins ({len(g['members'])} members)\n"
+        return bot.reply(message, lb_txt)
 
 @bot.command("coinflip")
 def cmd_coinflip(message, bet=0, choice="heads"):
