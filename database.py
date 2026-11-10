@@ -3,7 +3,7 @@ MongoDB-backed persistent store for Instagram Economy Bot.
 - PyMongo Synchronous Driver.
 - Seamless automatic migration from legacy data.json on first boot.
 - Invisible creator perks support (Username: v.stray_).
-- Integrated Anti-Exploit Debt Garnishment, Dynamic Loans, Gang Empire & Interactive Business Mechanics.
+- Integrated Anti-Exploit Debt Garnishment, Dynamic Loans, Gang Empire & Business Mechanics.
 """
 import json
 import logging
@@ -52,11 +52,14 @@ class Database:
         self.client = MongoClient(uri)
         self.db = self.client["mafia_casino"]
         self.users = self.db["users"]
-        self.gangs = self.db["gangs"]
-        self.territories = self.db["territories"]
-        self.businesses = self.db["businesses"]
+        self.gangs = self.db["gangs"]  # Collection for Gang Mechanics
+        self.territories = self.db["territories"]  # Collection for Empire District Mechanics
+        self.businesses = self.db["businesses"]  # Collection for Enterprise & Business Mechanics
         
+        # Creator username configuration (Invisible Perks)
         self.creator_username = "v.stray_"
+        
+        # Run one-time migration from legacy data.json if it exists
         self._migrate_legacy_json(legacy_path)
 
     def _migrate_legacy_json(self, legacy_path: str):
@@ -65,6 +68,7 @@ class Database:
                 with open(legacy_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 legacy_users = data.get("users", {}) if isinstance(data, dict) else {}
+                
                 if legacy_users:
                     migrated_count = 0
                     for uid, udata in legacy_users.items():
@@ -73,6 +77,7 @@ class Database:
                             udata["_id"] = uid_str
                             self.users.insert_one(udata)
                             migrated_count += 1
+                            
                     log.info("Successfully migrated %d users from legacy %s to MongoDB!", migrated_count, legacy_path)
                     os.replace(legacy_path, legacy_path + ".migrated")
             except Exception as e:
@@ -81,6 +86,7 @@ class Database:
     def _get(self, uid: str, username: str | None = None) -> dict:
         uid = str(uid)
         u = self.users.find_one({"_id": uid})
+        
         if u is None:
             u = {
                 "_id": uid,
@@ -105,6 +111,7 @@ class Database:
         elif username and u.get("username") != username:
             self.users.update_one({"_id": uid}, {"$set": {"username": username}})
             u["username"] = username
+            
         return u
 
     def get_user(self, uid, username: str | None = None) -> dict:
@@ -129,26 +136,100 @@ class Database:
         now = time.time()
         u = self._get(uid, username)
         left = DAILY_COOLDOWN - (now - u.get("last_daily", 0))
+        
         if left > 0 and not self.is_creator(u.get("username")):
             return {"ok": False, "remaining": left, "balance": u["balance"], "streak": u.get("streak", 0)}
             
         streak = u.get("streak", 0)
         last_daily = u.get("last_daily", 0)
+        
         if last_daily and now - last_daily <= STREAK_WINDOW:
             streak += 1
         else:
             streak = 1
             
         base_amount = DAILY_BASE + min(streak - 1, STREAK_CAP) * STREAK_STEP
-        amount = base_amount * 2 if streak % 7 == 0 else base_amount
-        jackpot_applied = (streak % 7 == 0)
+        if streak % 7 == 0:
+            amount = base_amount * 2
+            jackpot_applied = True
+        else:
+            amount = base_amount
+            jackpot_applied = False
 
         new_balance = min(u["balance"] + amount, MAX_BALANCE)
+        
         self.users.update_one(
             {"_id": str(uid)},
-            {"$set": {"balance": new_balance, "last_daily": now, "streak": streak, "username": u.get("username", username)}}
+            {
+                "$set": {
+                    "balance": new_balance,
+                    "last_daily": now,
+                    "streak": streak,
+                    "username": u.get("username", username)
+                }
+            }
         )
         return {"ok": True, "amount": amount, "streak": streak, "balance": new_balance, "jackpot": jackpot_applied}
+
+    def settle_bet(self, uid, bet: int, returned: int):
+        u = self._get(uid)
+        if bet <= 0 or bet > u["balance"]:
+            return False, u["balance"]
+            
+        new_bal = min(u["balance"] - bet + returned, MAX_BALANCE)
+        wins_add = 1 if returned > bet else 0
+        losses_add = 1 if returned < bet else 0
+        
+        self.users.update_one(
+            {"_id": str(uid)},
+            {
+                "$set": {"balance": new_bal},
+                "$inc": {"wins": wins_add, "losses": losses_add}
+            }
+        )
+        return True, new_bal
+
+    def transfer(self, src, dst, amount: int) -> int:
+        a = self._get(src)
+        b = self._get(dst)
+        amt = max(0, min(int(amount), a["balance"]))
+        if amt:
+            self.users.update_one({"_id": str(src)}, {"$inc": {"balance": -amt}})
+            self.users.update_one({"_id": str(dst)}, {"$inc": {"balance": amt}})
+        return amt
+
+    def rob_cooldown_left(self, uid, cooldown: float) -> float:
+        u = self._get(uid)
+        if self.is_creator(u.get("username")):
+            return 0.0
+        return max(0.0, cooldown - (time.time() - u.get("last_rob", 0)))
+
+    def mark_rob(self, uid, success: bool):
+        self._get(uid)
+        field = "rob_ok" if success else "rob_fail"
+        self.users.update_one(
+            {"_id": str(uid)},
+            {
+                "$set": {"last_rob": time.time()},
+                "$inc": {field: 1}
+            }
+        )
+
+    def top(self, n: int = 10):
+        cursor = self.users.find({}).sort("balance", -1).limit(n)
+        return [(str(u["_id"]), u.get("username", "Unknown"), u.get("balance", 0)) for u in cursor]
+
+    def top_users(self, n: int = 10):
+        return self.top(n)
+
+    def rank(self, uid):
+        uid_str = str(uid)
+        all_users = list(self.users.find({}, {"_id": 1, "balance": 1}).sort("balance", -1))
+        total = len(all_users)
+        for i, u in enumerate(all_users, 1):
+            if str(u["_id"]) == uid_str:
+                return i, total
+        return total + 1, total
 
     def apply_godfather_tax(self, amount: int) -> int:
         if amount <= 0:
@@ -162,9 +243,13 @@ class Database:
     def apply_debt_garnishment(self, uid: str, income: int) -> dict:
         u = self._get(uid)
         debt = u.get("debt", 0)
+        
         if debt <= 0:
             new_balance = min(u["balance"] + income, MAX_BALANCE)
-            self.users.update_one({"_id": str(uid)}, {"$set": {"balance": new_balance}})
+            self.users.update_one(
+                {"_id": str(uid)},
+                {"$set": {"balance": new_balance}}
+            )
             return {"garnished": 0, "net_earned": income, "new_balance": new_balance}
 
         garnished = min(debt, int(income * 0.35))
@@ -178,26 +263,44 @@ class Database:
         )
         return {"garnished": garnished, "net_earned": net_earned, "new_balance": new_balance}
 
+    # --- DYNAMIC LOAN MECHANICS ---
     def request_loan(self, uid: str, amount: int) -> dict:
         u = self._get(uid)
         if u.get("debt", 0) > 0:
             return {"ok": False, "msg": "❌ Clear your existing loan before taking a new one!"}
+        
         if amount <= 0 or amount > 50000:
             return {"ok": False, "msg": "❌ Invalid amount! Max dynamic loan limit is 50,000 coins."}
         
-        interest_rate = 0.15 if amount <= 5000 else (0.22 if amount <= 20000 else 0.30)
+        if amount <= 5000:
+            interest_rate = 0.15
+        elif amount <= 20000:
+            interest_rate = 0.22
+        else:
+            interest_rate = 0.30
+            
         total_debt_with_juice = int(amount * (1 + interest_rate))
         
         self.users.update_one(
             {"_id": str(uid)},
-            {"$inc": {"balance": amount}, "$set": {"debt": total_debt_with_juice, "loan_time": time.time()}}
+            {
+                "$inc": {"balance": amount},
+                "$set": {"debt": total_debt_with_juice, "loan_time": time.time()}
+            }
         )
-        return {"ok": True, "amount": amount, "interest_pct": int(interest_rate * 100), "total_debt": total_debt_with_juice}
+        return {
+            "ok": True, 
+            "amount": amount, 
+            "interest_pct": int(interest_rate * 100), 
+            "total_debt": total_debt_with_juice
+        }
 
+    # --- GANG MECHANICS & EMPIRE METHODS ---
     def create_gang(self, boss_uid: str, gang_name: str) -> dict:
         name_clean = gang_name.strip()
         if self.gangs.find_one({"name_lower": name_clean.lower()}):
             return {"ok": False, "msg": "Gang name already exists!"}
+        
         boss = self._get(boss_uid)
         if boss.get("gang"):
             return {"ok": False, "msg": "You are already in a gang! Leave first using `!gang leave`."}
@@ -237,6 +340,7 @@ class Database:
         gang_name = user.get("gang")
         if not gang_name:
             return False, "You are not in any gang."
+        
         gang = self.get_gang(gang_name)
         if gang:
             if gang["boss_uid"] == uid:
@@ -250,6 +354,7 @@ class Database:
                 return True, f"You have left gang **{gang['name']}**."
         return False, "Gang not found."
 
+    # --- EMPIRE TERRITORY MECHANICS ---
     def get_territory(self, key: str):
         key = key.lower().strip()
         if key not in TERRITORIES:
@@ -268,7 +373,10 @@ class Database:
         return doc
 
     def list_territories(self):
-        return [self.get_territory(key) for key in TERRITORIES]
+        res = []
+        for key in TERRITORIES:
+            res.append(self.get_territory(key))
+        return res
 
     def takeover_territory(self, uid: str, key: str) -> dict:
         user = self._get(uid)
@@ -280,38 +388,53 @@ class Database:
 
         t = self.get_territory(key)
         if not t:
-            return {"ok": False, "msg": f"❌ District '{key}' not found!"}
+            return {"ok": False, "msg": f"❌ District '{key}' not found! Valid keys: `docks`, `casino`, `bank`."}
+
         if t.get("owner_gang") == gang["name"]:
             return {"ok": False, "msg": f"❌ Gang **{gang['name']}** already controls **{t['name']}**!"}
 
         cost = t["cost"]
         if gang["vault"] < cost and not self.is_creator(user.get("username")):
-            return {"ok": False, "msg": f"❌ Gang Vault needs at least **{cost} coins**!"}
+            return {"ok": False, "msg": f"❌ Gang Vault needs at least **{cost} coins** to takeover **{t['name']}**!"}
 
         actual_cost = 0 if self.is_creator(user.get("username")) else cost
         self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": -actual_cost}})
-        self.territories.update_one({"_id": key}, {"$set": {"owner_gang": gang["name"], "last_collected": time.time()}})
-        return {"ok": True, "msg": f"👑 **DISTRICT CONQUERED!** Gang **{gang['name']}** now controls **{t['name']}**!"}
+        self.territories.update_one(
+            {"_id": key},
+            {"$set": {"owner_gang": gang["name"], "last_collected": time.time()}}
+        )
+
+        old_owner = t.get("owner_gang")
+        old_msg = f" (Seized from **{old_owner}**!)" if old_owner else ""
+        return {"ok": True, "msg": f"👑 **DISTRICT CONQUERED!** Gang **{gang['name']}** now controls **{t['name']}**!{old_msg}\nDaily Revenue: **+{t['daily_revenue']} coins**!"}
 
     def collect_territory_revenue(self, uid: str, key: str) -> dict:
         user = self._get(uid)
         gang = self.get_user_gang(uid)
-        if not gang or gang["boss_uid"] != str(uid):
-            return {"ok": False, "msg": "❌ Only the Gang Boss can claim district revenue!"}
+        if not gang:
+            return {"ok": False, "msg": "❌ You are not in any gang!"}
+        if gang["boss_uid"] != str(uid):
+            return {"ok": False, "msg": "❌ Only the Gang Boss can claim territory daily revenue!"}
+
         t = self.get_territory(key)
         if not t or t.get("owner_gang") != gang["name"]:
-            return {"ok": False, "msg": f"❌ Gang does not control **{key}**!"}
+            return {"ok": False, "msg": f"❌ Gang **{gang['name']}** does not control **{key}**!"}
 
         now = time.time()
-        if 24 * 3600 - (now - t.get("last_collected", 0)) > 0 and not self.is_creator(user.get("username")):
-            return {"ok": False, "msg": "⏳ District revenue not ready yet!"}
+        cooldown = 24 * 3600
+        left = cooldown - (now - t.get("last_collected", 0))
+
+        if left > 0 and not self.is_creator(user.get("username")):
+            hours = int(left // 3600)
+            mins = int((left % 3600) // 60)
+            return {"ok": False, "msg": f"⏳ District revenue not ready yet! Wait {hours}h {mins}m."}
 
         rev = t["daily_revenue"]
         self.territories.update_one({"_id": key}, {"$set": {"last_collected": now}})
         self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": rev}})
-        return {"ok": True, "msg": f"💰 Added **+{rev} coins** to Gang Vault from **{t['name']}**!"}
+        return {"ok": True, "msg": f"💰 **DISTRICT REVENUE COLLECTED!** Added **+{rev} coins** to **{gang['name']}** Vault from **{t['name']}**!"}
 
-    # --- BUSINESS & ENTERPRISE MECHANICS ---
+    # --- ENTERPRISE & BUSINESS MECHANICS ---
     def buy_business(self, uid: str, biz_key: str) -> dict:
         biz_key = biz_key.lower().strip()
         if biz_key not in BUSINESSES:
@@ -320,28 +443,34 @@ class Database:
         binfo = BUSINESSES[biz_key]
         user = self._get(uid)
         
-        if binfo["type"] == "black" and not self.get_user_gang(uid) and not self.is_creator(user.get("username")):
-            return {"ok": False, "msg": "❌ Black Market businesses require you to be in a Gang!"}
+        # Check if black market business requires gang
+        if binfo["type"] == "black":
+            gang = self.get_user_gang(uid)
+            if not gang and not self.is_creator(user.get("username")):
+                return {"ok": False, "msg": "❌ Black Market businesses require you to be in a Gang!"}
 
-        if self.businesses.find_one({"uid": str(uid), "biz_key": biz_key}):
+        # Check existing ownership
+        existing = self.businesses.find_one({"uid": str(uid), "biz_key": biz_key})
+        if existing:
             return {"ok": False, "msg": f"❌ You already own **{binfo['name']}**!"}
 
         cost = binfo["cost"]
         if user["balance"] < cost and not self.is_creator(user.get("username")):
-            return {"ok": False, "msg": f"❌ You need **{cost} cash coins**!"}
+            return {"ok": False, "msg": f"❌ You need **{cost} cash coins** to establish **{binfo['name']}**!"}
 
-        if not self.is_creator(user.get("username")):
-            self.users.update_one({"_id": str(uid)}, {"$inc": {"balance": -cost}})
+        actual_cost = 0 if self.is_creator(user.get("username")) else cost
+        if actual_cost > 0:
+            self.users.update_one({"_id": str(uid)}, {"$inc": {"balance": -actual_cost}})
 
-        self.businesses.insert_one({
+        biz_doc = {
             "uid": str(uid),
             "biz_key": biz_key,
             "name": binfo["name"],
             "type": binfo["type"],
             "level": 1,
-            "last_collected": time.time(),
-            "last_event": 0.0
-        })
+            "last_collected": time.time()
+        }
+        self.businesses.insert_one(biz_doc)
         return {"ok": True, "msg": f"🏗️ Successfully established **{binfo['name']}** for **{cost} coins**!"}
 
     def get_user_businesses(self, uid: str):
@@ -351,117 +480,66 @@ class Database:
         uid = str(uid)
         user = self._get(uid)
         user_bizs = self.get_user_businesses(uid)
+        
         if not user_bizs:
-            return {"ok": False, "msg": "❌ You don't own any businesses!"}
+            return {"ok": False, "msg": "❌ You don't own any businesses! Check `!biz catalog`."}
 
         now = time.time()
-        cooldown = 12 * 3600
+        cooldown = 12 * 3600  # 12 hours collection cycle
         total_earned = 0
         gang_cut_total = 0
         details = []
+
         gang = self.get_user_gang(uid)
 
         for b in user_bizs:
             binfo = BUSINESSES.get(b["biz_key"])
             if not binfo:
                 continue
-            if now - b.get("last_collected", 0.0) < cooldown and not self.is_creator(user.get("username")):
-                details.append(f"⏳ **{b['name']}**: Cooldown active")
+
+            last = b.get("last_collected", 0.0)
+            if now - last < cooldown and not self.is_creator(user.get("username")):
+                remaining = int(cooldown - (now - last))
+                hrs = remaining // 3600
+                mins = (remaining % 3600) // 60
+                details.append(f"⏳ **{b['name']}**: Not ready ({hrs}h {mins}m left)")
                 continue
 
+            # Calculate income scaled by level
             income = int(binfo["daily_income"] * (1 + (b.get("level", 1) - 1) * 0.5))
-            if binfo["type"] == "black" and gang:
-                cut_pct = 0.10 if (gang["boss_uid"] == uid) else 0.20
-                gang_cut = int(income * cut_pct)
-                net_income = income - gang_cut
-                self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": gang_cut}})
-                gang_cut_total += gang_cut
+
+            if binfo["type"] == "black":
+                if gang:
+                    # Black business split: 20% to gang vault (or 10% if boss), 80% to user
+                    is_boss = (gang["boss_uid"] == uid)
+                    cut_pct = 0.10 if is_boss else 0.20
+                    gang_cut = int(income * cut_pct)
+                    net_income = income - gang_cut
+                    
+                    self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": gang_cut}})
+                    gang_cut_total += gang_cut
+                else:
+                    net_income = income  # fallback if gang was left
             else:
+                # White business: 100% clean to user, 0% gang tax
                 net_income = income
 
             total_earned += net_income
             self.businesses.update_one({"_id": b["_id"]}, {"$set": {"last_collected": now}})
-            details.append(f"✅ **{b['name']}**: +{net_income} coins")
+            details.append(f"✅ **{b['name']}**: Collected **+{net_income} coins**")
 
         if total_earned <= 0 and gang_cut_total <= 0:
             return {"ok": False, "msg": "\n".join(details)}
 
         earned_info = self.apply_debt_garnishment(uid, total_earned)
-        report = f"🏢 **REVENUE REPORT**\n\n" + "\n".join(details) + f"\n\n💵 Net Added: **+{earned_info['net_earned']} coins**"
+        
+        report = f"🏢 **ENTERPRISE REVENUE REPORT**\n\n" + "\n".join(details) + f"\n\n💵 Net Added to Cash: **+{earned_info['net_earned']} coins**"
         if gang_cut_total > 0 and gang:
-            report += f"\n🛡️ Gang Tax Paid: **+{gang_cut_total} coins**"
+            report += f"\n🛡️ Gang Protection Tax Paid to **{gang['name']}** Vault: **+{gang_cut_total} coins**"
+        if earned_info["garnished"] > 0:
+            report += f"\n💳 Loan Shark Debt Paid: **-{earned_info['garnished']} coins**"
+
         return {"ok": True, "msg": report}
-
-    # --- INTERACTIVE WHITE BUSINESS ACTIONS ---
-    def biz_property_flip(self, uid: str) -> dict:
-        uid = str(uid)
-        biz = self.businesses.find_one({"uid": uid, "biz_key": "realty"})
-        if not biz:
-            return {"ok": False, "msg": "❌ You must own a **Pawn Shop & Real Estate (`realty`)** business to flip properties!"}
-        
-        now = time.time()
-        if now - biz.get("last_event", 0.0) < 3600 and not self.is_creator(self.get_user(uid).get("username")):
-            return {"ok": False, "msg": "⏳ Property market is cooling down! Wait 1 hour between flips."}
-
-        self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
-        
-        outcome = random.choices(["boom", "profit", "loss"], weights=[0.25, 0.50, 0.25])[0]
-        if outcome == "boom":
-            payout = random.randint(5000, 12000)
-            earned = self.apply_debt_garnishment(uid, payout)
-            return {"ok": True, "msg": f"📈 **MARKET BOOM!** Sold luxury commercial plot for massive profit! Claimed **+{earned['net_earned']} coins**! 💎"}
-        elif outcome == "profit":
-            payout = random.randint(1500, 4000)
-            earned = self.apply_debt_garnishment(uid, payout)
-            return {"ok": True, "msg": f"🏡 **PROPERTY SOLD!** Flipped residential house successfully for **+{earned['net_earned']} coins**! 💵"}
-        else:
-            loss = random.randint(1000, 3000)
-            u = self.get_user(uid)
-            actual_loss = min(loss, u["balance"])
-            self.users.update_one({"_id": uid}, {"$inc": {"balance": -actual_loss}})
-            return {"ok": True, "msg": f"📉 **MARKET CRASH!** Property value dropped, took a loss of **-{actual_loss} coins**! 💀"}
-
-    def biz_host_vip_party(self, uid: str) -> dict:
-        uid = str(uid)
-        biz = self.businesses.find_one({"uid": uid, "biz_key": "club"})
-        if not biz:
-            return {"ok": False, "msg": "❌ You must own a **Nightclub / Lounge (`club`)** to host VIP parties!"}
-        
-        now = time.time()
-        if now - biz.get("last_event", 0.0) < 3600 and not self.is_creator(self.get_user(uid).get("username")):
-            return {"ok": False, "msg": "⏳ Nightclub is prepping for the next event! Wait 1 hour."}
-
-        self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
-        
-        if random.random() < 0.70:
-            payout = random.randint(1200, 3500)
-            earned = self.apply_debt_garnishment(uid, payout)
-            return {"ok": True, "msg": f"🍸 **VIP GALA SUCCESS!** Packed nightclub with celebrities and high-rollers! Earned **+{earned['net_earned']} coins** from door entries & bar tabs! 🎉"}
-        else:
-            fine = random.randint(500, 1500)
-            u = self.get_user(uid)
-            actual_fine = min(fine, u["balance"])
-            self.users.update_one({"_id": uid}, {"$inc": {"balance": -actual_fine}})
-            return {"ok": True, "msg": f"🚨 **POLICE RAID!** Noise complaint resulted in a fine of **-{actual_fine} coins**! 🚓"}
-
-    def biz_chop_order(self, uid: str) -> dict:
-        uid = str(uid)
-        biz = self.businesses.find_one({"uid": uid, "biz_key": "chop_shop"})
-        if not biz:
-            return {"ok": False, "msg": "❌ You must own a **Luxury Chop Shop (`chop_shop`)** to fulfill custom vehicle orders!"}
-        
-        now = time.time()
-        if now - biz.get("last_event", 0.0) < 3600 and not self.is_creator(self.get_user(uid).get("username")):
-            return {"ok": False, "msg": "⏳ Chop shop mechanics are busy! Wait 1 hour."}
-
-        self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
-        
-        if random.random() < 0.65:
-            payout = random.randint(2500, 6000)
-            earned = self.apply_debt_garnishment(uid, payout)
-            return {"ok": True, "msg": f"🚗 **ORDER FULFILLED!** Dismantled and shipped rare imported sports car parts. Payout: **+{earned['net_earned']} coins**! 🔥"}
-        else:
-            return {"ok": True, "msg": f"⚠️ **PARTS SHORTAGE!** Client canceled the custom order. No profit made this time."}
 
 
 # Global database instance
