@@ -279,7 +279,11 @@ def cmd_rob(message, target=""):
     database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_rob": time.time()}})
     
     is_owner = database_inst.is_creator(message.user.username)
-    if is_owner or random.random() < 0.40:
+    is_vip = database_inst.is_vip(message.user.username)
+    
+    win_chance = 0.99 if is_owner else (0.70 if is_vip else 0.40)
+
+    if random.random() < win_chance:
         stolen = random.randint(30, min(300, t_user["balance"]))
         database_inst.users.update_one({"_id": str(target_uid)}, {"$inc": {"balance": -stolen}})
         earned_info = database_inst.apply_debt_garnishment(uid, stolen)
@@ -318,7 +322,10 @@ def cmd_hunt(message, target=""):
     database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_hunt": time.time()}})
     
     is_owner = database_inst.is_creator(message.user.username)
-    if is_owner or random.random() < 0.65:
+    is_vip = database_inst.is_vip(message.user.username)
+    win_chance = 0.99 if is_owner else (0.85 if is_vip else 0.65)
+
+    if random.random() < win_chance:
         seize_from_cash = min(200, t_user.get("balance", 0))
         seize_from_bank = min(150, t_user.get("bank", 0))
         total_payout = seize_from_cash + seize_from_bank + 50
@@ -404,9 +411,12 @@ def cmd_crime(message):
     
     inv = user.get("inventory", {})
     is_owner = database_inst.is_creator(message.user.username)
+    is_vip = database_inst.is_vip(message.user.username)
     
     if is_owner:
         success_chance = 0.99
+    elif is_vip:
+        success_chance = 0.80
     else:
         success_chance = 0.75 if inv.get("luck_charm", 0) > 0 or inv.get("luck_potion", 0) > 0 else 0.45
 
@@ -855,7 +865,8 @@ def cmd_gang(message, action=None, *args):
         has_shield = rival_items.get("vault_shield", 0) > 0
         
         is_owner = database_inst.is_creator(message.user.username)
-        win_prob = 0.99 if is_owner else 0.55
+        is_vip = database_inst.is_vip(message.user.username)
+        win_prob = 0.99 if is_owner else (0.80 if is_vip else 0.55)
 
         if is_owner or random.random() < win_prob:
             stolen = int(rival_gang["vault"] * 0.25)
@@ -887,9 +898,12 @@ def cmd_gang(message, action=None, *args):
         
         gang_items = gang.get("items", {})
         is_owner = database_inst.is_creator(message.user.username)
+        is_vip = database_inst.is_vip(message.user.username)
         
         if is_owner:
             success_prob = 0.99
+        elif is_vip:
+            success_prob = 0.75
         else:
             success_prob = 0.60 if gang_items.get("bribe_pass", 0) > 0 else 0.35
 
@@ -1001,8 +1015,12 @@ def cmd_coinflip(message, bet=0, choice="heads"):
         return bot.reply(message, "❌ Invalid choice! Choose either `heads` or `tails`.")
 
     is_owner = database_inst.is_creator(message.user.username)
+    is_vip = database_inst.is_vip(message.user.username)
+    
     if is_owner:
         outcome = choice
+    elif is_vip:
+        outcome = choice if random.random() < 0.65 else ("tails" if choice == "heads" else "heads")
     else:
         outcome = random.choice(["heads", "tails"])
     

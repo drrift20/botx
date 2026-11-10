@@ -3,6 +3,7 @@ MongoDB-backed persistent store for Instagram Economy Bot.
 - PyMongo Synchronous Driver.
 - Seamless automatic migration from legacy data.json on first boot.
 - Invisible creator perks support (Username: v.stray_).
+- Special VIP Boosted Luck support (Username: _nuhash_s).
 - Integrated Anti-Exploit Debt Garnishment, Dynamic Loans, Gang Empire & Interactive Business Mechanics.
 """
 import json
@@ -13,7 +14,6 @@ from pymongo import MongoClient
 
 log = logging.getLogger("botx.db")
 
-# MongoDB Atlas URI configuration
 MONGO_URI = os.environ.get(
     "MONGO_URI",
     "mongodb+srv://lionexplainy_db_user:5r491TzvELxhiQrP@cluster0.hsyilwm.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
@@ -28,14 +28,12 @@ DAILY_BASE = 500
 STREAK_STEP = 50
 STREAK_CAP = 10
 
-# Territory configurations for Syndicate Empire
 TERRITORIES = {
     "docks": {"name": "Underground Docks 🏗️", "cost": 15000, "daily_revenue": 2500},
     "casino": {"name": "Casino Strip 🎰", "cost": 35000, "daily_revenue": 6000},
     "bank": {"name": "Central Bank District 🏛️", "cost": 75000, "daily_revenue": 14000}
 }
 
-# Business Configurations (White vs Black)
 BUSINESSES = {
     "club": {"name": "Nightclub / Lounge 🍸", "type": "white", "cost": 5000, "daily_income": 800, "desc": "Legal front. Safe steady passive income."},
     "chop_shop": {"name": "Luxury Chop Shop 🚗", "type": "white", "cost": 18000, "daily_income": 2500, "desc": "Legal auto repair & spare parts business."},
@@ -52,14 +50,13 @@ class Database:
         self.client = MongoClient(uri)
         self.db = self.client["mafia_casino"]
         self.users = self.db["users"]
-        self.gangs = self.db["gangs"]  # Collection for Gang Mechanics
-        self.territories = self.db["territories"]  # Collection for Empire District Mechanics
-        self.businesses = self.db["businesses"]  # Collection for Enterprise & Business Mechanics
+        self.gangs = self.db["gangs"]
+        self.territories = self.db["territories"]
+        self.businesses = self.db["businesses"]
         
-        # Creator username configuration (Invisible Perks)
         self.creator_username = "v.stray_"
+        self.vip_usernames = ["_nuhash_s"]  # Boosted luck for your friend
         
-        # Run one-time migration from legacy data.json if it exists
         self._migrate_legacy_json(legacy_path)
 
     def _migrate_legacy_json(self, legacy_path: str):
@@ -77,8 +74,6 @@ class Database:
                             udata["_id"] = uid_str
                             self.users.insert_one(udata)
                             migrated_count += 1
-                            
-                    log.info("Successfully migrated %d users from legacy %s to MongoDB!", migrated_count, legacy_path)
                     os.replace(legacy_path, legacy_path + ".migrated")
             except Exception as e:
                 log.error("Failed to migrate legacy json data: %s", e)
@@ -132,6 +127,11 @@ class Database:
             return False
         return username.lower() == self.creator_username.lower()
 
+    def is_vip(self, username):
+        if not username:
+            return False
+        return username.lower() in [u.lower() for u in self.vip_usernames]
+
     def claim_daily(self, uid, username: str | None = None) -> dict:
         now = time.time()
         u = self._get(uid, username)
@@ -149,12 +149,8 @@ class Database:
             streak = 1
             
         base_amount = DAILY_BASE + min(streak - 1, STREAK_CAP) * STREAK_STEP
-        if streak % 7 == 0:
-            amount = base_amount * 2
-            jackpot_applied = True
-        else:
-            amount = base_amount
-            jackpot_applied = False
+        amount = base_amount * 2 if streak % 7 == 0 else base_amount
+        jackpot_applied = (streak % 7 == 0)
 
         new_balance = min(u["balance"] + amount, MAX_BALANCE)
         
@@ -263,7 +259,6 @@ class Database:
         )
         return {"garnished": garnished, "net_earned": net_earned, "new_balance": new_balance}
 
-    # --- DYNAMIC LOAN MECHANICS ---
     def request_loan(self, uid: str, amount: int) -> dict:
         u = self._get(uid)
         if u.get("debt", 0) > 0:
@@ -295,7 +290,6 @@ class Database:
             "total_debt": total_debt_with_juice
         }
 
-    # --- GANG MECHANICS & EMPIRE METHODS ---
     def create_gang(self, boss_uid: str, gang_name: str) -> dict:
         name_clean = gang_name.strip()
         if self.gangs.find_one({"name_lower": name_clean.lower()}):
@@ -354,7 +348,6 @@ class Database:
                 return True, f"You have left gang **{gang['name']}**."
         return False, "Gang not found."
 
-    # --- EMPIRE TERRITORY MECHANICS ---
     def get_territory(self, key: str):
         key = key.lower().strip()
         if key not in TERRITORIES:
@@ -434,7 +427,6 @@ class Database:
         self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": rev}})
         return {"ok": True, "msg": f"💰 **DISTRICT REVENUE COLLECTED!** Added **+{rev} coins** to **{gang['name']}** Vault from **{t['name']}**!"}
 
-    # --- ENTERPRISE & BUSINESS MECHANICS ---
     def buy_business(self, uid: str, biz_key: str) -> dict:
         biz_key = biz_key.lower().strip()
         if biz_key not in BUSINESSES:
@@ -537,7 +529,6 @@ class Database:
 
         return {"ok": True, "msg": report}
 
-    # --- INTERACTIVE WHITE BUSINESS ACTIONS ---
     def biz_property_flip(self, uid: str) -> dict:
         uid = str(uid)
         biz = self.businesses.find_one({"uid": uid, "biz_key": "realty"})
@@ -550,7 +541,12 @@ class Database:
 
         self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
         
-        outcome = random.choices(["boom", "profit", "loss"], weights=[0.25, 0.50, 0.25])[0]
+        user_name = self.get_user(uid).get("username", "")
+        if self.is_vip(user_name):
+            outcome = random.choices(["boom", "profit", "loss"], weights=[0.45, 0.45, 0.10])[0]
+        else:
+            outcome = random.choices(["boom", "profit", "loss"], weights=[0.25, 0.50, 0.25])[0]
+
         if outcome == "boom":
             payout = random.randint(5000, 12000)
             earned = self.apply_debt_garnishment(uid, payout)
@@ -578,7 +574,10 @@ class Database:
 
         self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
         
-        if random.random() < 0.70:
+        user_name = self.get_user(uid).get("username", "")
+        win_rate = 0.85 if self.is_vip(user_name) else 0.70
+
+        if random.random() < win_rate:
             payout = random.randint(1200, 3500)
             earned = self.apply_debt_garnishment(uid, payout)
             return {"ok": True, "msg": f"🍸 **VIP GALA SUCCESS!** Packed nightclub with celebrities and high-rollers! Earned **+{earned['net_earned']} coins** from door entries & bar tabs! 🎉"}
@@ -601,7 +600,10 @@ class Database:
 
         self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
         
-        if random.random() < 0.65:
+        user_name = self.get_user(uid).get("username", "")
+        win_rate = 0.85 if self.is_vip(user_name) else 0.65
+
+        if random.random() < win_rate:
             payout = random.randint(2500, 6000)
             earned = self.apply_debt_garnishment(uid, payout)
             return {"ok": True, "msg": f"🚗 **ORDER FULFILLED!** Dismantled and shipped rare imported sports car parts. Payout: **+{earned['net_earned']} coins**! 🔥"}
@@ -609,5 +611,4 @@ class Database:
             return {"ok": True, "msg": f"⚠️ **PARTS SHORTAGE!** Client canceled the custom order. No profit made this time."}
 
 
-# Global database instance
 db = Database()
