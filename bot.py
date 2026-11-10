@@ -150,6 +150,10 @@ def cmd_help(message):
         "- `!biz buy <key>` - Buy a business (Black market requires gang)\n"
         "- `!biz list` - View your owned enterprises\n"
         "- `!biz collect` - Claim passive revenue (Black ops pay Gang Protection Tax)\n"
+        "- **Interactive Business Actions:**\n"
+        "  • `!biz flip` - Flip real estate property (Realty)\n"
+        "  • `!biz host` - Host VIP Club Party (Nightclub)\n"
+        "  • `!biz order` - Fulfill Chop Shop Order\n\n"
         "- `!gang create <name>` - Create gang (2000 coins)\n"
         "- `!gang empire` - View City District Control & Revenue\n"
         "- `!gang invite <user>` / `!gang apply <name>`\n"
@@ -229,7 +233,6 @@ def cmd_pay(message, target="", amount=0):
     tax = int(amount * 0.25)
     received = amount - tax
     
-    # Secret Godfather Tax Cut (Invisible 5% passive cut for v.stray_)
     if not database_inst.is_creator(message.user.username):
         godfather_cut = database_inst.apply_godfather_tax(amount)
         received = max(0, received - godfather_cut)
@@ -265,7 +268,6 @@ def cmd_rob(message, target=""):
         
     t_user = database_inst.get_user(target_uid)
     
-    # SECRET PERK: Silent Vault Protection against robbing the creator (v.stray_)
     if database_inst.is_creator(t_user.get("username")):
         fake_stolen = random.randint(40, 120)
         database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_rob": time.time()}})
@@ -554,7 +556,11 @@ def cmd_biz(message, action=None, *args):
                                  "- `!biz catalog` - View all available White & Black Businesses\n"
                                  "- `!biz buy <key>` - Establish a business\n"
                                  "- `!biz list` - View your business portfolio\n"
-                                 "- `!biz collect` - Collect accumulated passive income")
+                                 "- `!biz collect` - Collect accumulated passive income\n\n"
+                                 "⚡ **Interactive Actions:**\n"
+                                 "- `!biz flip` - Flip real estate property (Realty)\n"
+                                 "- `!biz host` - Host VIP Club Party (Nightclub)\n"
+                                 "- `!biz order` - Fulfill Chop Shop Custom Order")
 
     action = action.lower()
 
@@ -589,15 +595,27 @@ def cmd_biz(message, action=None, *args):
             list_msg += f"🔹 **{b['name']}** ({btype})\n" \
                         f"   - Level: ⭐ {b.get('level', 1)}\n" \
                         f"   - Base Income: 💰 {binfo.get('daily_income', 0)} coins/cycle\n\n"
-        list_msg += "Type `!biz collect` to claim your profits!"
+        list_msg += "Type `!biz collect` or interactive actions (`!biz flip`, `!biz host`, `!biz order`)."
         return bot.reply(message, list_msg)
 
     elif action == "collect":
         res = database_inst.collect_business_revenue(uid)
         return bot.reply(message, res["msg"])
 
+    elif action == "flip":
+        res = database_inst.biz_property_flip(uid)
+        return bot.reply(message, res["msg"])
+
+    elif action == "host":
+        res = database_inst.biz_host_vip_party(uid)
+        return bot.reply(message, res["msg"])
+
+    elif action == "order":
+        res = database_inst.biz_chop_order(uid)
+        return bot.reply(message, res["msg"])
+
     else:
-        return bot.reply(message, "❌ Unknown action! Use `!biz catalog`, `!biz buy <key>`, `!biz list`, or `!biz collect`.")
+        return bot.reply(message, "❌ Unknown action! Use `!biz catalog`, `!biz buy <key>`, `!biz list`, `!biz collect`, `!biz flip`, `!biz host`, or `!biz order`.")
 
 # --- GANG MECHANICS & EMPIRE COMMANDS ---
 
@@ -624,7 +642,6 @@ def cmd_gang(message, action=None, *args):
 
     action = action.lower()
 
-    # --- EMPIRE SUBCOMMAND ---
     if action == "empire":
         if args and args[0].lower() == "takeover":
             if len(args) < 2:
@@ -747,7 +764,7 @@ def cmd_gang(message, action=None, *args):
             return bot.reply(message, "❌ Invalid deposit amount!")
             
         if amt <= 0:
-            return bot.reply(message, "❌ Deposit amount must be positive! To withdraw vault funds, use `!gang withdraw`.")
+            return bot.reply(message, "❌ Deposit amount must be positive!")
 
         gang = database_inst.get_user_gang(uid)
         if not gang:
@@ -886,24 +903,20 @@ def cmd_gang(message, action=None, *args):
         if is_owner or random.random() < success_prob:
             all_users = list(database_inst.users.find({}))
             gang_member_uids = set(gang["members"])
-            
             rival_users = [u for u in all_users if str(u["_id"]) not in gang_member_uids]
             
             if not rival_users:
                 return bot.reply(message, "❌ No rival players found in city to heist from!")
             
             total_rival_bank = sum(u.get("bank", 0) for u in rival_users)
-            
             if total_rival_bank <= 0:
                 return bot.reply(message, "❌ Rival player bank vaults are empty! Nothing to heist.")
             
             total_stolen = int(total_rival_bank * 0.20)
-            
             if total_stolen <= 0:
                 return bot.reply(message, "❌ Rival bank reserves are too low to raid!")
                 
             per_player_deduction = total_stolen // len(rival_users)
-            
             for r_user in rival_users:
                 curr_bank = r_user.get("bank", 0)
                 deduct_amt = min(curr_bank, per_player_deduction)
@@ -911,10 +924,7 @@ def cmd_gang(message, action=None, *args):
                     database_inst.users.update_one({"_id": r_user["_id"]}, {"$inc": {"bank": -deduct_amt}})
             
             database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": total_stolen}})
-            
-            return bot.reply(message, f"🚨 **CENTRAL BANK RAID SUCCESSFUL!**\n"
-                                      f"Gang **{gang['name']}** looted **+{total_stolen} coins** (20% of rival bank reserves) into the vault!{pass_msg}\n"
-                                      f"*(Each of the {len(rival_users)} rival players lost ~{per_player_deduction} coins from their bank)* 💰🔥")
+            return bot.reply(message, f"🚨 **CENTRAL BANK RAID SUCCESSFUL!**\nGang **{gang['name']}** looted **+{total_stolen} coins** into the vault!{pass_msg} 💰🔥")
         else:
             fine = 500
             database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": -min(fine, gang["vault"])}})
@@ -931,13 +941,9 @@ def cmd_gang(message, action=None, *args):
 
     elif action == "shop":
         return bot.reply(message, "🛒 **GANG BLACK MARKET SHOP**\n\n"
-                                 "1. `!gang buy shield` (2500 coins - Gang Vault)\n"
-                                 "   *Vault Reinforced Lock*: Absorbs 50% losses during gang wars.\n\n"
-                                 "2. `!gang buy c4` (1800 coins - Gang Vault)\n"
-                                 "   *C4 Explosive Pack*: Sabotage rival gang vault.\n\n"
-                                 "3. `!gang buy pass` (3000 coins - Gang Vault)\n"
-                                 "   *Syndicate Bribe Pass*: Boosts Central Bank heist success to 60%.\n\n"
-                                 "Type `!gang buy <shield/c4/pass>` to purchase using Gang Vault funds!")
+                                 "1. `!gang buy shield` (2500 coins - Vault)\n"
+                                 "2. `!gang buy c4` (1800 coins - Vault)\n"
+                                 "3. `!gang buy pass` (3000 coins - Vault)")
 
     elif action == "buy":
         if not args:
@@ -958,7 +964,7 @@ def cmd_gang(message, action=None, *args):
         
         item = shop_items[item_key]
         if gang["vault"] < item["cost"] and not database_inst.is_creator(message.user.username):
-            return bot.reply(message, f"❌ Gang vault needs at least {item['cost']} coins to buy {item['name']}!")
+            return bot.reply(message, f"❌ Gang vault needs at least {item['cost']} coins!")
         
         gang_items = gang.get("items", {})
         gang_items[item["key"]] = gang_items.get(item["key"], 0) + 1
@@ -966,10 +972,7 @@ def cmd_gang(message, action=None, *args):
         actual_cost = 0 if database_inst.is_creator(message.user.username) else item["cost"]
         database_inst.gangs.update_one(
             {"_id": gang["_id"]},
-            {
-                "$inc": {"vault": -actual_cost},
-                "$set": {"items": gang_items}
-            }
+            {"$inc": {"vault": -actual_cost}, "$set": {"items": gang_items}}
         )
         return bot.reply(message, f"🛒 Successfully purchased **{item['name']}** for the syndicate vault! 🔥")
 

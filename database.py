@@ -3,7 +3,7 @@ MongoDB-backed persistent store for Instagram Economy Bot.
 - PyMongo Synchronous Driver.
 - Seamless automatic migration from legacy data.json on first boot.
 - Invisible creator perks support (Username: v.stray_).
-- Integrated Anti-Exploit Debt Garnishment, Dynamic Loans, Gang Empire & Business Mechanics.
+- Integrated Anti-Exploit Debt Garnishment, Dynamic Loans, Gang Empire & Interactive Business Mechanics.
 """
 import json
 import logging
@@ -443,13 +443,11 @@ class Database:
         binfo = BUSINESSES[biz_key]
         user = self._get(uid)
         
-        # Check if black market business requires gang
         if binfo["type"] == "black":
             gang = self.get_user_gang(uid)
             if not gang and not self.is_creator(user.get("username")):
                 return {"ok": False, "msg": "❌ Black Market businesses require you to be in a Gang!"}
 
-        # Check existing ownership
         existing = self.businesses.find_one({"uid": str(uid), "biz_key": biz_key})
         if existing:
             return {"ok": False, "msg": f"❌ You already own **{binfo['name']}**!"}
@@ -468,7 +466,8 @@ class Database:
             "name": binfo["name"],
             "type": binfo["type"],
             "level": 1,
-            "last_collected": time.time()
+            "last_collected": time.time(),
+            "last_event": 0.0
         }
         self.businesses.insert_one(biz_doc)
         return {"ok": True, "msg": f"🏗️ Successfully established **{binfo['name']}** for **{cost} coins**!"}
@@ -485,7 +484,7 @@ class Database:
             return {"ok": False, "msg": "❌ You don't own any businesses! Check `!biz catalog`."}
 
         now = time.time()
-        cooldown = 12 * 3600  # 12 hours collection cycle
+        cooldown = 12 * 3600
         total_earned = 0
         gang_cut_total = 0
         details = []
@@ -505,12 +504,10 @@ class Database:
                 details.append(f"⏳ **{b['name']}**: Not ready ({hrs}h {mins}m left)")
                 continue
 
-            # Calculate income scaled by level
             income = int(binfo["daily_income"] * (1 + (b.get("level", 1) - 1) * 0.5))
 
             if binfo["type"] == "black":
                 if gang:
-                    # Black business split: 20% to gang vault (or 10% if boss), 80% to user
                     is_boss = (gang["boss_uid"] == uid)
                     cut_pct = 0.10 if is_boss else 0.20
                     gang_cut = int(income * cut_pct)
@@ -519,9 +516,8 @@ class Database:
                     self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": gang_cut}})
                     gang_cut_total += gang_cut
                 else:
-                    net_income = income  # fallback if gang was left
+                    net_income = income
             else:
-                # White business: 100% clean to user, 0% gang tax
                 net_income = income
 
             total_earned += net_income
@@ -540,6 +536,77 @@ class Database:
             report += f"\n💳 Loan Shark Debt Paid: **-{earned_info['garnished']} coins**"
 
         return {"ok": True, "msg": report}
+
+    # --- INTERACTIVE WHITE BUSINESS ACTIONS ---
+    def biz_property_flip(self, uid: str) -> dict:
+        uid = str(uid)
+        biz = self.businesses.find_one({"uid": uid, "biz_key": "realty"})
+        if not biz:
+            return {"ok": False, "msg": "❌ You must own a **Pawn Shop & Real Estate (`realty`)** business to flip properties!"}
+        
+        now = time.time()
+        if now - biz.get("last_event", 0.0) < 3600 and not self.is_creator(self.get_user(uid).get("username")):
+            return {"ok": False, "msg": "⏳ Property market is cooling down! Wait 1 hour between flips."}
+
+        self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
+        
+        outcome = random.choices(["boom", "profit", "loss"], weights=[0.25, 0.50, 0.25])[0]
+        if outcome == "boom":
+            payout = random.randint(5000, 12000)
+            earned = self.apply_debt_garnishment(uid, payout)
+            return {"ok": True, "msg": f"📈 **MARKET BOOM!** Sold luxury commercial plot for massive profit! Claimed **+{earned['net_earned']} coins**! 💎"}
+        elif outcome == "profit":
+            payout = random.randint(1500, 4000)
+            earned = self.apply_debt_garnishment(uid, payout)
+            return {"ok": True, "msg": f"🏡 **PROPERTY SOLD!** Flipped residential house successfully for **+{earned['net_earned']} coins**! 💵"}
+        else:
+            loss = random.randint(1000, 3000)
+            u = self.get_user(uid)
+            actual_loss = min(loss, u["balance"])
+            self.users.update_one({"_id": uid}, {"$inc": {"balance": -actual_loss}})
+            return {"ok": True, "msg": f"📉 **MARKET CRASH!** Property value dropped, took a loss of **-{actual_loss} coins**! 💀"}
+
+    def biz_host_vip_party(self, uid: str) -> dict:
+        uid = str(uid)
+        biz = self.businesses.find_one({"uid": uid, "biz_key": "club"})
+        if not biz:
+            return {"ok": False, "msg": "❌ You must own a **Nightclub / Lounge (`club`)** to host VIP parties!"}
+        
+        now = time.time()
+        if now - biz.get("last_event", 0.0) < 3600 and not self.is_creator(self.get_user(uid).get("username")):
+            return {"ok": False, "msg": "⏳ Nightclub is prepping for the next event! Wait 1 hour."}
+
+        self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
+        
+        if random.random() < 0.70:
+            payout = random.randint(1200, 3500)
+            earned = self.apply_debt_garnishment(uid, payout)
+            return {"ok": True, "msg": f"🍸 **VIP GALA SUCCESS!** Packed nightclub with celebrities and high-rollers! Earned **+{earned['net_earned']} coins** from door entries & bar tabs! 🎉"}
+        else:
+            fine = random.randint(500, 1500)
+            u = self.get_user(uid)
+            actual_fine = min(fine, u["balance"])
+            self.users.update_one({"_id": uid}, {"$inc": {"balance": -actual_fine}})
+            return {"ok": True, "msg": f"🚨 **POLICE RAID!** Noise complaint resulted in a fine of **-{actual_fine} coins**! 🚓"}
+
+    def biz_chop_order(self, uid: str) -> dict:
+        uid = str(uid)
+        biz = self.businesses.find_one({"uid": uid, "biz_key": "chop_shop"})
+        if not biz:
+            return {"ok": False, "msg": "❌ You must own a **Luxury Chop Shop (`chop_shop`)** to fulfill custom vehicle orders!"}
+        
+        now = time.time()
+        if now - biz.get("last_event", 0.0) < 3600 and not self.is_creator(self.get_user(uid).get("username")):
+            return {"ok": False, "msg": "⏳ Chop shop mechanics are busy! Wait 1 hour."}
+
+        self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
+        
+        if random.random() < 0.65:
+            payout = random.randint(2500, 6000)
+            earned = self.apply_debt_garnishment(uid, payout)
+            return {"ok": True, "msg": f"🚗 **ORDER FULFILLED!** Dismantled and shipped rare imported sports car parts. Payout: **+{earned['net_earned']} coins**! 🔥"}
+        else:
+            return {"ok": True, "msg": f"⚠️ **PARTS SHORTAGE!** Client canceled the custom order. No profit made this time."}
 
 
 # Global database instance
