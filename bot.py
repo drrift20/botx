@@ -145,19 +145,17 @@ def cmd_help(message):
         "- `!coinflip <amt/all/half> <heads/tails>` - Gambling!"
     )
     part2 = (
-        "🏛️ **GANG EMPIRE & SHOP - HELP (2/2)** 🏛️\n\n"
+        "🏛️ **ENTERPRISE & GANG EMPIRE - HELP (2/2)** 🏛️\n\n"
+        "- `!biz catalog` - View White & Black Businesses\n"
+        "- `!biz buy <key>` - Buy a business (Black market requires gang)\n"
+        "- `!biz list` - View your owned enterprises\n"
+        "- `!biz collect` - Claim passive revenue (Black ops pay Gang Protection Tax)\n"
         "- `!gang create <name>` - Create gang (2000 coins)\n"
-        "- `!gang empire` - View City District Ownership & Revenue\n"
-        "- `!gang empire takeover <district>` - Takeover District (docks/casino/bank)\n"
-        "- `!gang empire collect <district>` - Collect Daily Empire Revenue\n"
-        "- `!gang invite <user>` / `!gang apply <name>` - Recruitment\n"
-        "- `!gang accept [user]` / `!gang decline` / `!gang leave`\n"
-        "- `!gang vault` - View treasury & items\n"
-        "- `!gang deposit <amt>` / `!gang withdraw <amt>`\n"
+        "- `!gang empire` - View City District Control & Revenue\n"
+        "- `!gang invite <user>` / `!gang apply <name>`\n"
+        "- `!gang vault` / `!gang deposit` / `!gang withdraw`\n"
         "- `!gang heist` - Raid Central Bank Vaults\n"
-        "- `!gang war <rival>` - Attack rival gang vault\n"
-        "- `!gang lb` - Gang Leaderboard\n"
-        "- `!gang shop` & `!gang buy <item>` - Black Market Gear"
+        "- `!gang war <rival>` - Attack rival gang vault"
     )
     bot.reply(message, part1)
     time.sleep(1)
@@ -544,6 +542,63 @@ def cmd_buy(message, item_name=""):
     total_qty = inv[item['key']]
     bot.reply(message, f"🧪 Purchased **{item['name']}**! You now own {total_qty}.")
 
+# --- BUSINESS & ENTERPRISE COMMANDS ---
+
+@bot.command("biz")
+def cmd_biz(message, action=None, *args):
+    uid = str(message.user.pk)
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    
+    if not action:
+        return bot.reply(message, "🏢 **ENTERPRISE & BUSINESS SYSTEM**\n\n"
+                                 "- `!biz catalog` - View all available White & Black Businesses\n"
+                                 "- `!biz buy <key>` - Establish a business\n"
+                                 "- `!biz list` - View your business portfolio\n"
+                                 "- `!biz collect` - Collect accumulated passive income")
+
+    action = action.lower()
+
+    if action == "catalog":
+        cat_msg = "📋 **CITY BUSINESS CATALOG**\n\n"
+        for key, b in db.BUSINESSES.items():
+            btype = "⚪ White Front (Solo)" if b["type"] == "white" else "🔴 Black Market (Gang Req.)"
+            cat_msg += f"📍 **{b['name']}** (`{key}`)\n" \
+                       f"   - Type: {btype}\n" \
+                       f"   - Cost: 💵 {b['cost']} coins\n" \
+                       f"   - Daily Income: 💰 +{b['daily_income']} coins\n" \
+                       f"   - Info: {b['desc']}\n\n"
+        cat_msg += "Type `!biz buy <key>` to invest!"
+        return bot.reply(message, cat_msg)
+
+    elif action == "buy":
+        if not args:
+            return bot.reply(message, "❌ Usage: `!biz buy <business_key>` (Check `!biz catalog`)")
+        biz_key = args[0].lower()
+        res = database_inst.buy_business(uid, biz_key)
+        return bot.reply(message, res["msg"])
+
+    elif action == "list":
+        user_bizs = database_inst.get_user_businesses(uid)
+        if not user_bizs:
+            return bot.reply(message, "❌ You don't own any businesses! Check `!biz catalog`.")
+        
+        list_msg = "🏢 **YOUR ENTERPRISE PORTFOLIO**\n\n"
+        for b in user_bizs:
+            binfo = db.BUSINESSES.get(b["biz_key"], {})
+            btype = "⚪ White" if b.get("type") == "white" else "🔴 Black Market"
+            list_msg += f"🔹 **{b['name']}** ({btype})\n" \
+                        f"   - Level: ⭐ {b.get('level', 1)}\n" \
+                        f"   - Base Income: 💰 {binfo.get('daily_income', 0)} coins/cycle\n\n"
+        list_msg += "Type `!biz collect` to claim your profits!"
+        return bot.reply(message, list_msg)
+
+    elif action == "collect":
+        res = database_inst.collect_business_revenue(uid)
+        return bot.reply(message, res["msg"])
+
+    else:
+        return bot.reply(message, "❌ Unknown action! Use `!biz catalog`, `!biz buy <key>`, `!biz list`, or `!biz collect`.")
+
 # --- GANG MECHANICS & EMPIRE COMMANDS ---
 
 @bot.command("gang")
@@ -697,7 +752,7 @@ def cmd_gang(message, action=None, *args):
         gang = database_inst.get_user_gang(uid)
         if not gang:
             return bot.reply(message, "❌ You are not in any gang!")
-        if user["balance"] < amt and not database_inst.is_creator(message.user.username):
+        if user["balance"] < amt and not database_inst.is_creator(user.get("username")):
             return bot.reply(message, "❌ You don't have enough cash in hand!")
         
         if not database_inst.is_creator(message.user.username):

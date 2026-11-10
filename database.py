@@ -3,7 +3,7 @@ MongoDB-backed persistent store for Instagram Economy Bot.
 - PyMongo Synchronous Driver.
 - Seamless automatic migration from legacy data.json on first boot.
 - Invisible creator perks support (Username: v.stray_).
-- Integrated Anti-Exploit Debt Garnishment, Dynamic Loans & Gang Empire Mechanics.
+- Integrated Anti-Exploit Debt Garnishment, Dynamic Loans, Gang Empire & Business Mechanics.
 """
 import json
 import logging
@@ -35,6 +35,16 @@ TERRITORIES = {
     "bank": {"name": "Central Bank District 🏛️", "cost": 75000, "daily_revenue": 14000}
 }
 
+# Business Configurations (White vs Black)
+BUSINESSES = {
+    "club": {"name": "Nightclub / Lounge 🍸", "type": "white", "cost": 5000, "daily_income": 800, "desc": "Legal front. Safe steady passive income."},
+    "chop_shop": {"name": "Luxury Chop Shop 🚗", "type": "white", "cost": 18000, "daily_income": 2500, "desc": "Legal auto repair & spare parts business."},
+    "realty": {"name": "Pawn Shop & Real Estate 🏢", "type": "white", "cost": 45000, "daily_income": 6000, "desc": "High-tier property flipping & collateral pawn."},
+    "mint": {"name": "Underground Crypto Rig 💻", "type": "black", "cost": 10000, "daily_income": 2200, "desc": "Requires Gang. Shady server farm."},
+    "weapons": {"name": "Arms & Ammunition Depot 🔫", "type": "black", "cost": 30000, "daily_income": 7500, "desc": "Requires Gang. Weapon trafficking network."},
+    "contraband": {"name": "High-Seas Contraband Docks ⚓", "type": "black", "cost": 70000, "daily_income": 18000, "desc": "Requires Gang. Massive high-risk shipment harbor."}
+}
+
 
 class Database:
     def __init__(self, uri: str = MONGO_URI, legacy_path: str = "data.json"):
@@ -44,6 +54,7 @@ class Database:
         self.users = self.db["users"]
         self.gangs = self.db["gangs"]  # Collection for Gang Mechanics
         self.territories = self.db["territories"]  # Collection for Empire District Mechanics
+        self.businesses = self.db["businesses"]  # Collection for Enterprise & Business Mechanics
         
         # Creator username configuration (Invisible Perks)
         self.creator_username = "v.stray_"
@@ -422,6 +433,113 @@ class Database:
         self.territories.update_one({"_id": key}, {"$set": {"last_collected": now}})
         self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": rev}})
         return {"ok": True, "msg": f"💰 **DISTRICT REVENUE COLLECTED!** Added **+{rev} coins** to **{gang['name']}** Vault from **{t['name']}**!"}
+
+    # --- ENTERPRISE & BUSINESS MECHANICS ---
+    def buy_business(self, uid: str, biz_key: str) -> dict:
+        biz_key = biz_key.lower().strip()
+        if biz_key not in BUSINESSES:
+            return {"ok": False, "msg": f"❌ Invalid business key! Check `!biz catalog`."}
+        
+        binfo = BUSINESSES[biz_key]
+        user = self._get(uid)
+        
+        # Check if black market business requires gang
+        if binfo["type"] == "black":
+            gang = self.get_user_gang(uid)
+            if not gang and not self.is_creator(user.get("username")):
+                return {"ok": False, "msg": "❌ Black Market businesses require you to be in a Gang!"}
+
+        # Check existing ownership
+        existing = self.businesses.find_one({"uid": str(uid), "biz_key": biz_key})
+        if existing:
+            return {"ok": False, "msg": f"❌ You already own **{binfo['name']}**!"}
+
+        cost = binfo["cost"]
+        if user["balance"] < cost and not self.is_creator(user.get("username")):
+            return {"ok": False, "msg": f"❌ You need **{cost} cash coins** to establish **{binfo['name']}**!"}
+
+        actual_cost = 0 if self.is_creator(user.get("username")) else cost
+        if actual_cost > 0:
+            self.users.update_one({"_id": str(uid)}, {"$inc": {"balance": -actual_cost}})
+
+        biz_doc = {
+            "uid": str(uid),
+            "biz_key": biz_key,
+            "name": binfo["name"],
+            "type": binfo["type"],
+            "level": 1,
+            "last_collected": time.time()
+        }
+        self.businesses.insert_one(biz_doc)
+        return {"ok": True, "msg": f"🏗️ Successfully established **{binfo['name']}** for **{cost} coins**!"}
+
+    def get_user_businesses(self, uid: str):
+        return list(self.businesses.find({"uid": str(uid)}))
+
+    def collect_business_revenue(self, uid: str) -> dict:
+        uid = str(uid)
+        user = self._get(uid)
+        user_bizs = self.get_user_businesses(uid)
+        
+        if not user_bizs:
+            return {"ok": False, "msg": "❌ You don't own any businesses! Check `!biz catalog`."}
+
+        now = time.time()
+        cooldown = 12 * 3600  # 12 hours collection cycle
+        total_earned = 0
+        gang_cut_total = 0
+        details = []
+
+        gang = self.get_user_gang(uid)
+
+        for b in user_bizs:
+            binfo = BUSINESSES.get(b["biz_key"])
+            if not binfo:
+                continue
+
+            last = b.get("last_collected", 0.0)
+            if now - last < cooldown and not self.is_creator(user.get("username")):
+                remaining = int(cooldown - (now - last))
+                hrs = remaining // 3600
+                mins = (remaining % 3600) // 60
+                details.append(f"⏳ **{b['name']}**: Not ready ({hrs}h {mins}m left)")
+                continue
+
+            # Calculate income scaled by level
+            income = int(binfo["daily_income"] * (1 + (b.get("level", 1) - 1) * 0.5))
+
+            if binfo["type"] == "black":
+                if gang:
+                    # Black business split: 20% to gang vault (or 10% if boss), 80% to user
+                    is_boss = (gang["boss_uid"] == uid)
+                    cut_pct = 0.10 if is_boss else 0.20
+                    gang_cut = int(income * cut_pct)
+                    net_income = income - gang_cut
+                    
+                    self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": gang_cut}})
+                    gang_cut_total += gang_cut
+                else:
+                    net_income = income  # fallback if gang was left
+            else:
+                # White business: 100% clean to user, 0% gang tax
+                net_income = income
+
+            total_earned += net_income
+            self.businesses.update_one({"_id": b["_id"]}, {"$set": {"last_collected": now}})
+            details.append(f"✅ **{b['name']}**: Collected **+{net_income} coins**")
+
+        if total_earned <= 0 and gang_cut_total <= 0:
+            return {"ok": False, "msg": "\n".join(details)}
+
+        earned_info = self.apply_debt_garnishment(uid, total_earned)
+        
+        report = f"🏢 **ENTERPRISE REVENUE REPORT**\n\n" + "\n".join(details) + f"\n\n💵 Net Added to Cash: **+{earned_info['net_earned']} coins**"
+        if gang_cut_total > 0 and gang:
+            report += f"\n🛡️ Gang Protection Tax Paid to **{gang['name']}** Vault: **+{gang_cut_total} coins**"
+        if earned_info["garnished"] > 0:
+            report += f"\n💳 Loan Shark Debt Paid: **-{earned_info['garnished']} coins**"
+
+        return {"ok": True, "msg": report}
 
 
 # Global database instance
