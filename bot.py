@@ -140,26 +140,24 @@ def cmd_help(message):
         "- `!crime` - High-risk heist (Requires 150 bail)\n"
         "- `!rob <user>` - Mug a player (Requires 100 bail)\n"
         "- `!hunt <user>` - Hunt overdue debtors 🎯\n\n"
-        "🏦 **Bank & Gambling:**\n"
-        "- `!bank` - Vault & Syndicate loans\n"
+        "🏦 **Bank & Dynamic Loans:**\n"
+        "- `!bank` - Safe Vault & Dynamic Loans (Up to 50,000!)\n"
         "- `!coinflip <amt/all/half> <heads/tails>` - Gambling!"
     )
     part2 = (
-        "🏛️ **GANG SYSTEM & SHOP - HELP (2/2)** 🏛️\n\n"
+        "🏛️ **GANG EMPIRE & SHOP - HELP (2/2)** 🏛️\n\n"
         "- `!gang create <name>` - Create gang (2000 coins)\n"
-        "- `!gang invite <user>` - Boss invites member\n"
-        "- `!gang apply <name>` - Apply to join gang\n"
-        "- `!gang accept [user]` - Accept invite or applicant\n"
-        "- `!gang decline` - Decline gang invite\n"
-        "- `!gang leave` - Leave current gang\n"
+        "- `!gang empire` - View City District Ownership & Revenue\n"
+        "- `!gang empire takeover <district>` - Takeover District (docks/casino/bank)\n"
+        "- `!gang empire collect <district>` - Collect Daily Empire Revenue\n"
+        "- `!gang invite <user>` / `!gang apply <name>` - Recruitment\n"
+        "- `!gang accept [user]` / `!gang decline` / `!gang leave`\n"
         "- `!gang vault` - View treasury & items\n"
-        "- `!gang deposit <amt>` - Add cash to vault\n"
-        "- `!gang withdraw <amt>` - Boss request vault cash\n"
-        "- `!gang vote <yes/no>` - Vote on withdrawal\n"
-        "- `!gang heist` - Raid Central Bank\n"
+        "- `!gang deposit <amt>` / `!gang withdraw <amt>`\n"
+        "- `!gang heist` - Raid Central Bank Vaults\n"
         "- `!gang war <rival>` - Attack rival gang vault\n"
         "- `!gang lb` - Gang Leaderboard\n"
-        "- `!gang shop` & `!gang buy <item>` - Gang Gear"
+        "- `!gang shop` & `!gang buy <item>` - Black Market Gear"
     )
     bot.reply(message, part1)
     time.sleep(1)
@@ -487,24 +485,18 @@ def cmd_bank(message, action=None, amount=0):
         bot.reply(message, f"📤 Withdrew **{amount} coins** from your vault.")
         
     elif action == "loan":
-        if u["debt"] > 0:
-            return bot.reply(message, "❌ Clear your existing loan before taking a new one!")
-        if amount <= 0 or amount > 5000:
-            return bot.reply(message, "❌ Max loan limit is 5,000 coins!")
-        
-        total_debt_with_juice = int(amount * 1.25)
-        database_inst.users.update_one({"_id": str(uid)}, {
-            "$inc": {"balance": amount},
-            "$set": {"debt": total_debt_with_juice, "loan_time": time.time()}
-        })
-        bot.reply(message, f"💸 Loan approved: **{amount} coins**! Total debt with juice: **{total_debt_with_juice} coins**.")
+        res = database_inst.request_loan(uid, amount)
+        if not res["ok"]:
+            return bot.reply(message, res["msg"])
+        bot.reply(message, f"💸 Dynamic Loan approved: **{res['amount']} coins**! Interest Scale: **{res['interest_pct']}%**. Total debt with juice: **{res['total_debt']} coins**.")
         
     elif action == "repay":
         if u["debt"] <= 0:
             return bot.reply(message, "🎉 You have zero debt!")
         pay_amt = min(amount if amount > 0 else u["debt"], u["balance"], u["debt"])
         database_inst.users.update_one({"_id": str(uid)}, {"$inc": {"balance": -pay_amt, "debt": -pay_amt}})
-        bot.reply(message, f"✅ Repaid **{pay_amt} coins**. Remaining debt: **{u['debt'] - pay_amt} coins**.")
+        updated_u = database_inst.get_user(uid)
+        bot.reply(message, f"✅ Repaid **{pay_amt} coins**. Remaining debt: **{updated_u['debt']} coins**.")
 
 @bot.command("shop")
 def cmd_shop(message):
@@ -552,7 +544,7 @@ def cmd_buy(message, item_name=""):
     total_qty = inv[item['key']]
     bot.reply(message, f"🧪 Purchased **{item['name']}**! You now own {total_qty}.")
 
-# --- GANG MECHANICS COMMANDS ---
+# --- GANG MECHANICS & EMPIRE COMMANDS ---
 
 @bot.command("gang")
 def cmd_gang(message, action=None, *args):
@@ -561,23 +553,51 @@ def cmd_gang(message, action=None, *args):
     user = database_inst.get_user(uid, message.user.username)
     
     if not action:
-        return bot.reply(message, "🛡️ **SYNDICATE GANG SYSTEM**\n\n"
+        return bot.reply(message, "🛡️ **SYNDICATE GANG & EMPIRE SYSTEM**\n\n"
                                  "- `!gang create <name>` (Cost: 2000 coins)\n"
-                                 "- `!gang invite <username>` (Boss only)\n"
-                                 "- `!gang apply <name>` (Request to join)\n"
-                                 "- `!gang accept [username]` / `!gang decline` / `!gang leave`\n"
-                                 "- `!gang vault` - View shared treasury & items\n"
-                                 "- `!gang deposit <amt>` - Add funds\n"
-                                 "- `!gang withdraw <amt>` - Request vault funds\n"
-                                 "- `!gang vote <yes/no>` - Vote on boss withdrawal\n"
+                                 "- `!gang empire` - View City District Control\n"
+                                 "- `!gang empire takeover <docks/casino/bank>`\n"
+                                 "- `!gang empire collect <docks/casino/bank>`\n"
+                                 "- `!gang invite <user>` / `!gang apply <name>`\n"
+                                 "- `!gang accept [user]` / `!gang decline` / `!gang leave`\n"
+                                 "- `!gang vault` - View treasury & items\n"
+                                 "- `!gang deposit <amt>` / `!gang withdraw <amt>`\n"
                                  "- `!gang heist` - Raid Central Bank\n"
                                  "- `!gang war <rival_gang>` - Attack rival gang\n"
                                  "- `!gang lb` - Weekly Gang Leaderboard\n"
-                                 "- `!gang shop` & `!gang buy <item>` - Gang Black Market")
+                                 "- `!gang shop` & `!gang buy <item>`")
 
     action = action.lower()
+
+    # --- EMPIRE SUBCOMMAND ---
+    if action == "empire":
+        if args and args[0].lower() == "takeover":
+            if len(args) < 2:
+                return bot.reply(message, "❌ Usage: `!gang empire takeover <docks/casino/bank>`")
+            key = args[1].lower()
+            res = database_inst.takeover_territory(uid, key)
+            return bot.reply(message, res["msg"])
+            
+        elif args and args[0].lower() == "collect":
+            if len(args) < 2:
+                return bot.reply(message, "❌ Usage: `!gang empire collect <docks/casino/bank>`")
+            key = args[1].lower()
+            res = database_inst.collect_territory_revenue(uid, key)
+            return bot.reply(message, res["msg"])
+            
+        else:
+            territories = database_inst.list_territories()
+            msg_txt = "🏙️ **SYNDICATE CITY EMPIRE & DISTRICTS**\n\n"
+            for t in territories:
+                owner = f"Controlled by **{t['owner_gang']}** 👑" if t.get("owner_gang") else "Unclaimed 🔓"
+                msg_txt += f"📍 **{t['name']}** (`{t['_id']}`)\n" \
+                           f"   - Status: {owner}\n" \
+                           f"   - Takeover Cost: 💵 {t['cost']} vault coins\n" \
+                           f"   - Daily Revenue: 💰 +{t['daily_revenue']} coins/day\n\n"
+            msg_txt += "Commands:\n- `!gang empire takeover <district>`\n- `!gang empire collect <district>`"
+            return bot.reply(message, msg_txt)
     
-    if action == "create":
+    elif action == "create":
         if not args:
             return bot.reply(message, "❌ Usage: `!gang create <gang_name>`")
         gang_name = args[0]
@@ -812,25 +832,21 @@ def cmd_gang(message, action=None, *args):
             all_users = list(database_inst.users.find({}))
             gang_member_uids = set(gang["members"])
             
-            # 1. Collect all rival players outside this gang
             rival_users = [u for u in all_users if str(u["_id"]) not in gang_member_uids]
             
             if not rival_users:
                 return bot.reply(message, "❌ No rival players found in city to heist from!")
             
-            # 2. Sum up total rival bank reserves
             total_rival_bank = sum(u.get("bank", 0) for u in rival_users)
             
             if total_rival_bank <= 0:
                 return bot.reply(message, "❌ Rival player bank vaults are empty! Nothing to heist.")
             
-            # 3. Take 20% of total rival bank pool as stolen amount
             total_stolen = int(total_rival_bank * 0.20)
             
             if total_stolen <= 0:
                 return bot.reply(message, "❌ Rival bank reserves are too low to raid!")
                 
-            # 4. Equally deduct stolen amount from all rival players' bank accounts
             per_player_deduction = total_stolen // len(rival_users)
             
             for r_user in rival_users:
@@ -839,7 +855,6 @@ def cmd_gang(message, action=None, *args):
                 if deduct_amt > 0:
                     database_inst.users.update_one({"_id": r_user["_id"]}, {"$inc": {"bank": -deduct_amt}})
             
-            # 5. Add total stolen sum to Gang Vault
             database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": total_stolen}})
             
             return bot.reply(message, f"🚨 **CENTRAL BANK RAID SUCCESSFUL!**\n"
