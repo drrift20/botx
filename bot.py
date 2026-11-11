@@ -114,6 +114,20 @@ class InstagramBot:
 
                             mock_msg = MockMessage(MockUser(user_pk, uname), text, args)
                             try:
+                                database_inst = db.db if hasattr(db, "db") else db.Database()
+                                
+                                # Auto IRS Audit Check (24h excess bank tax)
+                                tax_info = database_inst.check_and_apply_irs_tax(user_pk)
+                                if tax_info.get("audited"):
+                                    self.reply(mock_msg, f"🏛️ **IRS AUDIT ALERT:** Deducted **-{tax_info['tax']} coins** (1.5% Wealth Tax) from @{uname}'s excess bank vault!")
+                                    time.sleep(1)
+
+                                # Auto Lottery Draw Check (24h automated jackpot draw)
+                                draw_info = database_inst.check_and_draw_lottery()
+                                if draw_info.get("drawn") and draw_info.get("msg"):
+                                    self.reply(mock_msg, draw_info["msg"])
+                                    time.sleep(1)
+
                                 func = self.commands[cmd]
                                 func(mock_msg, *args) if args else func(mock_msg)
                             except Exception as e:
@@ -129,34 +143,46 @@ bot = InstagramBot()
 @bot.command("help")
 def cmd_help(message):
     part1 = (
-        "🔥 **UNDERGROUND CASINO & MAFIA BOT - HELP (1/2)** 🔥\n\n"
+        "🔥 **UNDERGROUND CASINO & MAFIA BOT - HELP (1/3)** 🔥\n\n"
         "👤 **Profile & Money:**\n"
         "- `!daily` - Claim streak & weekly bonus\n"
         "- `!profile` (or `!bal`) - Net worth & stats\n"
         "- `!lb` - View rich list\n"
         "- `!pay <user> <amt>` - Transfer cash (25% Syndicate Tax)\n\n"
+        "🎰 **Casino & Gambling (Sinks):**\n"
+        "- `!coinflip <amt/all/half> <heads/tails>`\n"
+        "- `!slots <amt>` - Spin the 3-emoji reels! 🎰\n"
+        "- `!lottery` - View lottery pot & draw info 🎟️\n"
+        "- `!lottery buy <n>` - Buy tickets (1k each, max 10)\n\n"
         "⚡ **Action & Chaos:**\n"
         "- `!work` - Do a gig (30m cooldown)\n"
         "- `!crime` - High-risk heist (Requires 150 bail)\n"
         "- `!rob <user>` - Mug a player (Requires 100 bail)\n"
-        "- `!hunt <user>` - Hunt overdue debtors 🎯\n\n"
-        "🏦 **Bank & Dynamic Loans:**\n"
-        "- `!bank` - Safe Vault & Dynamic Loans (Up to 50,000!)\n"
-        "- `!coinflip <amt/all/half> <heads/tails>` - Gambling!"
+        "- `!hunt <user>` - Hunt overdue debtors 🎯\n"
+        "- `!guard` - Hire 24h Bodyguard protection 🛡️"
     )
     part2 = (
-        "🏛️ **ENTERPRISE & GANG EMPIRE - HELP (2/2)** 🏛️\n\n"
-        "- `!biz catalog` - View White & Black Businesses\n"
-        "- `!biz buy <key>` - Buy a business (Black market requires gang)\n"
-        "- `!biz list` - View your owned enterprises\n"
-        "- `!biz collect` - Claim passive revenue (Black ops pay Gang Protection Tax)\n"
-        "- **Interactive Business Actions:**\n"
-        "  • `!biz flip` - Flip real estate property (Realty)\n"
-        "  • `!biz host` - Host VIP Club Party (Nightclub)\n"
-        "  • `!biz order` - Fulfill Chop Shop Order\n\n"
+        "💎 **LUXURY FLEX & BOUNTIES - HELP (2/3)** 💎\n\n"
+        "- `!luxury` - View high-end flex catalog\n"
+        "- `!buy luxury <item>` - Purchase luxury items\n"
+        "- `!flex` (or `!showoff`) - Flash your items & status in GC!\n\n"
+        "🎯 **Bounty Escrow Contracts:**\n"
+        "- `!bounty <user> <amt>` - Put hit on a player (Min 1k)\n"
+        "- `!bounties` - View active hit contracts\n\n"
+        "🏦 **Bank & Dynamic Loans:**\n"
+        "- `!bank` - Safe Vault & Dynamic Loans (Up to 50,000!)\n"
+        "- *IRS Wealth Tax: 1.5% daily cut on bank balance > 50,000*"
+    )
+    part3 = (
+        "🏛️ **ENTERPRISE & GANG EMPIRE - HELP (3/3)** 🏛️\n\n"
+        "- `!biz catalog` / `!biz buy` / `!biz list` / `!biz collect`\n"
+        "- `!biz flip` / `!biz host` / `!biz order`\n\n"
+        "🏴 **Gang Empire & Upgrades:**\n"
         "- `!gang create <name>` - Create gang (2000 coins)\n"
+        "- `!gang upgrade` - Level up gang max members & vault cap!\n"
+        "- `!gang flag <emoji>` - Buy custom syndicate tag\n"
+        "- `!gang rename <new_name>` - Rename your syndicate\n"
         "- `!gang empire` - View City District Control & Revenue\n"
-        "- `!gang invite <user>` / `!gang apply <name>`\n"
         "- `!gang vault` / `!gang deposit` / `!gang withdraw`\n"
         "- `!gang heist` - Raid Central Bank Vaults\n"
         "- `!gang war <rival>` - Attack rival gang vault"
@@ -164,6 +190,8 @@ def cmd_help(message):
     bot.reply(message, part1)
     time.sleep(1)
     bot.reply(message, part2)
+    time.sleep(1)
+    bot.reply(message, part3)
 
 @bot.command("ping")
 def cmd_ping(message):
@@ -177,14 +205,23 @@ def cmd_profile(message):
     user = database_inst.get_user(uid, message.user.username)
     inv = user.get("inventory", {})
     inv_str = ", ".join([f"{k.replace('_', ' ').title()}: {v}" for k, v in inv.items() if v > 0]) or "Empty 🎒"
+    
+    lux_keys = user.get("luxuries", [])
+    lux_emojis = [db.LUXURY_ITEMS[k]["emoji"] for k in lux_keys if k in db.LUXURY_ITEMS]
+    lux_str = " ".join(lux_emojis) if lux_emojis else "None 🛍️"
+
+    guard_status = "🛡️ Active" if user.get("guard_expires", 0.0) > time.time() else "None ❌"
     gang_name = user.get("gang", "None 🚫")
     net_worth = user['balance'] + user['bank'] - user['debt']
+    
     bot.reply(message, f"👤 **MAFIA PROFILE: {message.user.username}**\n"
                       f"- Gang: 🛡️ {gang_name}\n"
                       f"- Cash in Hand: 💵 {user['balance']} coins\n"
                       f"- Bank Vault: 🏦 {user['bank']} coins\n"
                       f"- Debt: 💳 {user['debt']} coins\n"
                       f"- Net Worth: 💎 {net_worth} coins\n"
+                      f"- Bodyguard: {guard_status}\n"
+                      f"- Collection: {lux_str}\n"
                       f"- Gear: {inv_str}")
 
 @bot.command("leaderboard")
@@ -268,6 +305,11 @@ def cmd_rob(message, target=""):
         
     t_user = database_inst.get_user(target_uid)
     
+    # Bodyguard protection check
+    if t_user.get("guard_expires", 0.0) > time.time():
+        database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_rob": time.time()}})
+        return bot.reply(message, f"🛡️ **ATTACK NEUTRALIZED!** @{target}'s Bodyguard intercepted your robbery attempt! Cooldown triggered.")
+
     if database_inst.is_creator(t_user.get("username")):
         fake_stolen = random.randint(40, 120)
         database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_rob": time.time()}})
@@ -287,7 +329,11 @@ def cmd_rob(message, target=""):
         stolen = random.randint(30, min(300, t_user["balance"]))
         database_inst.users.update_one({"_id": str(target_uid)}, {"$inc": {"balance": -stolen}})
         earned_info = database_inst.apply_debt_garnishment(uid, stolen)
-        bot.reply(message, f"🥷 SUCCESSFUL HEIST! Looted **+{stolen} coins** from @{target}! *(Debt paid: {earned_info['garnished']})* 💰")
+        
+        # Check and claim bounty contract on successful hit
+        bounty_msg = database_inst.claim_bounty_on_hit(uid, target_uid)
+        
+        bot.reply(message, f"🥷 SUCCESSFUL HEIST! Looted **+{stolen} coins** from @{target}! *(Debt paid: {earned_info['garnished']})*{bounty_msg} 💰")
     else:
         fine = random.randint(50, 150)
         new_bal = max(0, user["balance"] - fine)
@@ -309,6 +355,12 @@ def cmd_hunt(message, target=""):
         return bot.reply(message, f"❌ Target user '@{target}' not found or invalid!")
         
     t_user = database_inst.get_user(target_uid)
+    
+    # Bodyguard protection check
+    if t_user.get("guard_expires", 0.0) > time.time():
+        database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_hunt": time.time()}})
+        return bot.reply(message, f"🛡️ **BOUNTY HUNT FAILED!** @{target}'s Bodyguard opened fire and repelled your attack!")
+
     t_debt = t_user.get("debt", 0)
     if t_debt <= 500:
         return bot.reply(message, f"❌ @{target} doesn't owe enough debt for a bounty hunt!")
@@ -338,12 +390,41 @@ def cmd_hunt(message, target=""):
             }
         )
         earned_info = database_inst.apply_debt_garnishment(uid, total_payout)
-        bot.reply(message, f"🎯 **BOUNTY COLLECTED!** Seized target funds & claimed **+{total_payout} coins**! *(Debt paid: {earned_info['garnished']})* 🔥")
+        bounty_msg = database_inst.claim_bounty_on_hit(uid, target_uid)
+        bot.reply(message, f"🎯 **BOUNTY COLLECTED!** Seized target funds & claimed **+{total_payout} coins**! *(Debt paid: {earned_info['garnished']})*{bounty_msg} 🔥")
     else:
         fine = 100
         new_bal = max(0, user["balance"] - fine)
         database_inst.users.update_one({"_id": str(uid)}, {"$set": {"balance": new_bal}, "$inc": {"debt": fine}})
         bot.reply(message, f"💥 **HUNT FAILED!** Paid medical penalty of **-{fine} coins** added to debt! 💀")
+
+@bot.command("guard")
+def cmd_guard(message):
+    uid = str(message.user.pk)
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    res = database_inst.buy_bodyguard(uid)
+    bot.reply(message, res["msg"])
+
+@bot.command("bounty")
+def cmd_bounty(message, target="", amount=0):
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError):
+        amount = 0
+        
+    if not target or amount <= 0:
+        return bot.reply(message, "❌ Usage: `!bounty <username> <amount>` (Min 1,000 coins)")
+        
+    uid = str(message.user.pk)
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    res = database_inst.place_bounty(uid, target, amount)
+    bot.reply(message, res["msg"])
+
+@bot.command("bounties")
+def cmd_bounties(message):
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    res = database_inst.list_active_bounties()
+    bot.reply(message, res["msg"])
 
 @bot.command("daily")
 def cmd_daily(message):
@@ -517,12 +598,18 @@ def cmd_shop(message):
                       "Type `!buy <item>` to grab gear!")
 
 @bot.command("buy")
-def cmd_buy(message, item_name=""):
+def cmd_buy(message, item_name="", *args):
     uid = str(message.user.pk)
     database_inst = db.db if hasattr(db, "db") else db.Database()
     user = database_inst.get_user(uid, message.user.username)
     
     item_name = item_name.lower()
+    
+    if item_name == "luxury" and args:
+        lux_key = args[0].lower()
+        res = database_inst.buy_luxury(uid, lux_key)
+        return bot.reply(message, res["msg"])
+
     shop_items = {
         "charm": {"name": "Lucky Charm", "cost": 500, "key": "luck_charm"},
         "potion": {"name": "Lucky Charm", "cost": 500, "key": "luck_charm"},
@@ -534,7 +621,7 @@ def cmd_buy(message, item_name=""):
     }
     
     if item_name not in shop_items:
-        return bot.reply(message, "❌ Item not found! Check `!shop`.")
+        return bot.reply(message, "❌ Item not found! Check `!shop` or `!luxury`.")
         
     item = shop_items[item_name]
     if user["balance"] < item["cost"] and not database_inst.is_creator(message.user.username):
@@ -553,6 +640,69 @@ def cmd_buy(message, item_name=""):
     )
     total_qty = inv[item['key']]
     bot.reply(message, f"🧪 Purchased **{item['name']}**! You now own {total_qty}.")
+
+# --- LOTTERY & CASINO SLOTS COMMANDS ---
+
+@bot.command("lottery")
+def cmd_lottery(message, action=None, count=1):
+    uid = str(message.user.pk)
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    
+    if not action:
+        state = database_inst.get_lottery_state()
+        now = time.time()
+        hrs_left = int(max(0, 24 * 3600 - (now - state.get("last_draw", now))) // 3600)
+        user_tix = state.get("tickets", {}).get(uid, 0)
+        total_tix = sum(state.get("tickets", {}).values())
+        return bot.reply(message, f"🎟️ **SYNDICATE DAILY LOTTERY**\n\n"
+                                 f"- Current Jackpot Pot: 💰 **{state['pot']} coins**\n"
+                                 f"- Tickets Sold: **{total_tix} tickets**\n"
+                                 f"- Your Tickets: **{user_tix}/10 tickets**\n"
+                                 f"- Time Until Next Draw: ⏳ **~{hrs_left} hours**\n\n"
+                                 f"Type `!lottery buy <amount>` to buy tickets! (1,000 coins/ticket)")
+    
+    action = action.lower()
+    if action == "buy":
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            count = 1
+            
+        res = database_inst.buy_lottery_tickets(uid, count)
+        return bot.reply(message, res["msg"])
+
+@bot.command("slots")
+def cmd_slots(message, bet=100):
+    uid = str(message.user.pk)
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    
+    try:
+        bet = int(bet)
+    except (TypeError, ValueError):
+        bet = 100
+
+    res = database_inst.play_slots(uid, bet)
+    bot.reply(message, res["msg"])
+
+# --- LUXURY FLEX COMMANDS ---
+
+@bot.command("luxury")
+def cmd_luxury(message):
+    catalog_text = "💎 **SYNDICATE LUXURY & STATUS CATALOG**\n\n"
+    for key, item in db.LUXURY_ITEMS.items():
+        catalog_text += f"{item['emoji']} **{item['name']}** (`!buy luxury {key}`)\n" \
+                        f"   - Price: 💵 **{item['cost']} coins**\n" \
+                        f"   - Status Title: *\"{item['title']}\"*\n\n"
+    catalog_text += "Type `!buy luxury <item_key>` to acquire status! Use `!flex` to show off."
+    bot.reply(message, catalog_text)
+
+@bot.command("flex")
+@bot.command("showoff")
+def cmd_flex(message):
+    uid = str(message.user.pk)
+    database_inst = db.db if hasattr(db, "db") else db.Database()
+    res = database_inst.flex_status(uid)
+    bot.reply(message, res["msg"])
 
 # --- BUSINESS & ENTERPRISE COMMANDS ---
 
@@ -638,9 +788,10 @@ def cmd_gang(message, action=None, *args):
     if not action:
         return bot.reply(message, "🛡️ **SYNDICATE GANG & EMPIRE SYSTEM**\n\n"
                                  "- `!gang create <name>` (Cost: 2000 coins)\n"
+                                 "- `!gang upgrade` - Upgrade Gang Level & Capacity\n"
+                                 "- `!gang flag <emoji>` - Buy custom gang flag emoji\n"
+                                 "- `!gang rename <new_name>` - Rename gang\n"
                                  "- `!gang empire` - View City District Control\n"
-                                 "- `!gang empire takeover <docks/casino/bank>`\n"
-                                 "- `!gang empire collect <docks/casino/bank>`\n"
                                  "- `!gang invite <user>` / `!gang apply <name>`\n"
                                  "- `!gang accept [user]` / `!gang decline` / `!gang leave`\n"
                                  "- `!gang vault` - View treasury & items\n"
@@ -652,7 +803,25 @@ def cmd_gang(message, action=None, *args):
 
     action = action.lower()
 
-    if action == "empire":
+    if action == "upgrade":
+        res = database_inst.upgrade_gang_level(uid)
+        return bot.reply(message, res["msg"])
+
+    elif action == "flag":
+        if not args:
+            return bot.reply(message, "❌ Usage: `!gang flag <emoji>` (Cost: 15,000 vault coins)")
+        flag_emoji = args[0]
+        res = database_inst.set_gang_flag(uid, flag_emoji)
+        return bot.reply(message, res["msg"])
+
+    elif action == "rename":
+        if not args:
+            return bot.reply(message, "❌ Usage: `!gang rename <new_name>` (Cost: 20,000 vault coins)")
+        new_name = " ".join(args)
+        res = database_inst.rename_gang(uid, new_name)
+        return bot.reply(message, res["msg"])
+
+    elif action == "empire":
         if args and args[0].lower() == "takeover":
             if len(args) < 2:
                 return bot.reply(message, "❌ Usage: `!gang empire takeover <docks/casino/bank>`")
@@ -733,6 +902,10 @@ def cmd_gang(message, action=None, *args):
             if not applicant_uid:
                 return bot.reply(message, f"❌ Specified user application not found!")
             
+            max_m = user_gang.get("max_members", 8)
+            if len(user_gang.get("members", [])) >= max_m:
+                return bot.reply(message, f"❌ Gang is full ({max_m} max members)! Upgrade gang level using `!gang upgrade`.")
+
             database_inst.gangs.update_many({}, {"$pull": {"members": applicant_uid, "applications": applicant_uid, "invites": applicant_uid}})
             database_inst.gangs.update_one({"_id": user_gang["_id"]}, {"$addToSet": {"members": applicant_uid}})
             database_inst.users.update_one({"_id": applicant_uid}, {"$set": {"gang": user_gang["name"]}})
@@ -744,6 +917,10 @@ def cmd_gang(message, action=None, *args):
             if not invited_gang:
                 return bot.reply(message, "❌ You have no pending gang invitations!")
             
+            max_m = invited_gang.get("max_members", 8)
+            if len(invited_gang.get("members", [])) >= max_m:
+                return bot.reply(message, f"❌ Gang **{invited_gang['name']}** is full ({max_m} max members)!")
+
             database_inst.remove_user_from_gang(uid)
             
             database_inst.gangs.update_one({"_id": invited_gang["_id"]}, {"$pull": {"invites": uid}, "$addToSet": {"members": uid}})
@@ -763,7 +940,11 @@ def cmd_gang(message, action=None, *args):
         if not gang:
             return bot.reply(message, "❌ You are not in any gang!")
         items_str = ", ".join([f"{k.replace('_', ' ').title()}: {v}" for k, v in gang.get("items", {}).items() if v > 0]) or "None 🚫"
-        return bot.reply(message, f"🏦 **{gang['name']} TREASURY**\n- Vault Balance: 💵 {gang['vault']} coins\n- Members: {len(gang['members'])}\n- Gang Gear: {items_str}")
+        lvl = gang.get("level", 1)
+        flag = gang.get("flag", "🏴")
+        vault_cap = gang.get("vault_cap", 50000)
+        max_members = gang.get("max_members", 8)
+        return bot.reply(message, f"{flag} **{gang['name']} TREASURY (Lvl {lvl})**\n- Vault Balance: 💵 **{gang['vault']}/{vault_cap} coins**\n- Roster: **{len(gang['members'])}/{max_members} members**\n- Gang Gear: {items_str}")
 
     elif action == "deposit":
         if not args:
@@ -782,6 +963,10 @@ def cmd_gang(message, action=None, *args):
         if user["balance"] < amt and not database_inst.is_creator(user.get("username")):
             return bot.reply(message, "❌ You don't have enough cash in hand!")
         
+        vault_cap = gang.get("vault_cap", 50000)
+        if gang["vault"] + amt > vault_cap and not database_inst.is_creator(user.get("username")):
+            return bot.reply(message, f"❌ Vault capacity limit reached! Max capacity: **{vault_cap} coins**. Upgrade gang level using `!gang upgrade`!")
+
         if not database_inst.is_creator(message.user.username):
             database_inst.users.update_one({"_id": uid}, {"$inc": {"balance": -amt}})
         database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": amt}})
@@ -877,8 +1062,11 @@ def cmd_gang(message, action=None, *args):
             else:
                 shield_msg = ""
                 
+            vault_cap = my_gang.get("vault_cap", 50000)
+            new_my_vault = min(my_gang["vault"] + stolen, vault_cap)
+            
             database_inst.gangs.update_one({"_id": rival_gang["_id"]}, {"$inc": {"vault": -stolen}, "$set": {"items": rival_items}})
-            database_inst.gangs.update_one({"_id": my_gang["_id"]}, {"$inc": {"vault": stolen}})
+            database_inst.gangs.update_one({"_id": my_gang["_id"]}, {"$set": {"vault": new_my_vault}})
             return bot.reply(message, f"⚔️ **GANG WAR VICTORY!** **{my_gang['name']}** raided **{rival_gang['name']}** and looted **+{stolen} vault coins**!{shield_msg} 🔥")
         else:
             loss = int(my_gang["vault"] * 0.10)
@@ -937,7 +1125,9 @@ def cmd_gang(message, action=None, *args):
                 if deduct_amt > 0:
                     database_inst.users.update_one({"_id": r_user["_id"]}, {"$inc": {"bank": -deduct_amt}})
             
-            database_inst.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": total_stolen}})
+            vault_cap = gang.get("vault_cap", 50000)
+            new_vault = min(gang["vault"] + total_stolen, vault_cap)
+            database_inst.gangs.update_one({"_id": gang["_id"]}, {"$set": {"vault": new_vault}})
             return bot.reply(message, f"🚨 **CENTRAL BANK RAID SUCCESSFUL!**\nGang **{gang['name']}** looted **+{total_stolen} coins** into the vault!{pass_msg} 💰🔥")
         else:
             fine = 500
@@ -950,7 +1140,9 @@ def cmd_gang(message, action=None, *args):
             return bot.reply(message, "📊 No gangs established yet!")
         lb_txt = "🏆 **SYNDICATE GANG LEADERBOARD**\n"
         for i, g in enumerate(all_gangs, 1):
-            lb_txt += f"{i}. **{g['name']}** — 🏦 {g['vault']} vault coins ({len(g['members'])} members)\n"
+            flag = g.get("flag", "🏴")
+            lvl = g.get("level", 1)
+            lb_txt += f"{i}. {flag} **{g['name']}** (Lvl {lvl}) — 🏦 {g['vault']} vault coins ({len(g['members'])} members)\n"
         return bot.reply(message, lb_txt)
 
     elif action == "shop":

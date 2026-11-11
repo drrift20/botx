@@ -5,6 +5,8 @@ MongoDB-backed persistent store for Instagram Economy Bot.
 - Invisible creator perks support (Username: v.stray_).
 - Special VIP Boosted Luck support (Username: _nuhash_s).
 - Integrated Anti-Exploit Debt Garnishment, Dynamic Loans, Gang Empire & Interactive Business Mechanics.
+- Phase 1 Additions: Automated Daily Lottery, Casino Slots, Luxury Items Collection & Flex System,
+  Bodyguard Security, Escrow Bounty Contracts, Automatic IRS Wealth Tax, and Advanced Gang Upgrades.
 """
 import json
 import logging
@@ -44,6 +46,21 @@ BUSINESSES = {
     "contraband": {"name": "High-Seas Contraband Docks ⚓", "type": "black", "cost": 70000, "daily_income": 18000, "desc": "Requires Gang. Massive high-risk shipment harbor."}
 }
 
+LUXURY_ITEMS = {
+    "rolex": {"name": "Rolex Submariner ⌚", "cost": 25000, "emoji": "⌚", "title": "The Timekeeper"},
+    "car": {"name": "Lamborghini Aventador 🚗", "cost": 100000, "emoji": "🚗", "title": "Street Royalty"},
+    "mansion": {"name": "Hillside Sky Mansion 🏰", "cost": 500000, "emoji": "🏰", "title": "Estate Overlord"},
+    "jet": {"name": "Private Gulfstream Jet ✈️", "cost": 2000000, "emoji": "✈️", "title": "Global Syndicate Elite"},
+    "yacht": {"name": "Superyacht 'Poseidon' 🛥️", "cost": 5000000, "emoji": "🛥️", "title": "Ocean Warlord"}
+}
+
+GANG_LEVELS = {
+    1: {"cost": 0, "max_members": 8, "vault_cap": 50000, "perk": "Standard Vault & Operations"},
+    2: {"cost": 10000, "max_members": 12, "vault_cap": 150000, "perk": "+1% Daily Vault Savings Interest"},
+    3: {"cost": 50000, "max_members": 20, "vault_cap": 500000, "perk": "+10% Gang War Attack Damage"},
+    4: {"cost": 200000, "max_members": 30, "vault_cap": 2000000, "perk": "+15% Central Bank Heist Success"}
+}
+
 
 class Database:
     def __init__(self, uri: str = MONGO_URI, legacy_path: str = "data.json"):
@@ -54,6 +71,8 @@ class Database:
         self.gangs = self.db["gangs"]
         self.territories = self.db["territories"]
         self.businesses = self.db["businesses"]
+        self.lottery_col = self.db["lottery"]
+        self.bounties_col = self.db["bounties"]
         
         self.creator_username = "v.stray_"
         self.vip_usernames = ["_nuhash_s"]  # Boosted luck for your friend
@@ -91,11 +110,15 @@ class Database:
                 "bank": 0,
                 "debt": 0,
                 "inventory": {},
+                "luxuries": [],
+                "guard_expires": 0.0,
+                "last_audit": time.time(),
                 "last_daily": 0.0,
                 "last_work": 0.0,
                 "last_crime": 0.0,
                 "last_rob": 0.0,
                 "last_hunt": 0.0,
+                "last_slots": 0.0,
                 "streak": 0,
                 "wins": 0,
                 "losses": 0,
@@ -104,9 +127,25 @@ class Database:
                 "gang": None
             }
             self.users.insert_one(u)
-        elif username and u.get("username") != username:
-            self.users.update_one({"_id": uid}, {"$set": {"username": username}})
-            u["username"] = username
+        else:
+            fields_to_set = {}
+            if username and u.get("username") != username:
+                fields_to_set["username"] = username
+                u["username"] = username
+            if "luxuries" not in u:
+                fields_to_set["luxuries"] = []
+                u["luxuries"] = []
+            if "guard_expires" not in u:
+                fields_to_set["guard_expires"] = 0.0
+                u["guard_expires"] = 0.0
+            if "last_audit" not in u:
+                fields_to_set["last_audit"] = time.time()
+                u["last_audit"] = time.time()
+            if "last_slots" not in u:
+                fields_to_set["last_slots"] = 0.0
+                u["last_slots"] = 0.0
+            if fields_to_set:
+                self.users.update_one({"_id": uid}, {"$set": fields_to_set})
             
         return u
 
@@ -132,6 +171,23 @@ class Database:
         if not username:
             return False
         return username.lower() in [u.lower() for u in self.vip_usernames]
+
+    def check_and_apply_irs_tax(self, uid: str) -> dict:
+        u = self._get(uid)
+        now = time.time()
+        last_audit = u.get("last_audit", 0.0)
+        
+        if now - last_audit >= 24 * 3600:
+            self.users.update_one({"_id": str(uid)}, {"$set": {"last_audit": now}})
+            bank_bal = u.get("bank", 0)
+            if bank_bal > 50000 and not self.is_creator(u.get("username")):
+                excess = bank_bal - 50000
+                tax = int(excess * 0.015)
+                if tax > 0:
+                    new_bank = bank_bal - tax
+                    self.users.update_one({"_id": str(uid)}, {"$set": {"bank": new_bank}})
+                    return {"audited": True, "tax": tax, "new_bank": new_bank}
+        return {"audited": False}
 
     def claim_daily(self, uid, username: str | None = None) -> dict:
         now = time.time()
@@ -291,6 +347,439 @@ class Database:
             "total_debt": total_debt_with_juice
         }
 
+    # --- LOTTERY SYSTEM ---
+    def get_lottery_state(self) -> dict:
+        state = self.lottery_col.find_one({"_id": "current"})
+        if not state:
+            state = {
+                "_id": "current",
+                "pot": 0,
+                "tickets": {},  # uid_str -> count
+                "last_draw": time.time()
+            }
+            self.lottery_col.insert_one(state)
+        return state
+
+    def buy_lottery_tickets(self, uid: str, count: int) -> dict:
+        uid = str(uid)
+        user = self._get(uid)
+        if count <= 0:
+            return {"ok": False, "msg": "❌ Ticket amount must be at least 1!"}
+        
+        state = self.get_lottery_state()
+        curr_tickets = state.get("tickets", {}).get(uid, 0)
+        
+        if curr_tickets + count > 10 and not self.is_creator(user.get("username")):
+            return {"ok": False, "msg": f"❌ Ticket cap reached! You already own **{curr_tickets}/10 tickets** for this draw."}
+        
+        ticket_price = 1000
+        total_cost = count * ticket_price
+        
+        if user["balance"] < total_cost and not self.is_creator(user.get("username")):
+            return {"ok": False, "msg": f"❌ You need **{total_cost} cash coins** to buy {count} ticket(s)!"}
+        
+        actual_cost = 0 if self.is_creator(user.get("username")) else total_cost
+        if actual_cost > 0:
+            self.users.update_one({"_id": uid}, {"$inc": {"balance": -actual_cost}})
+        
+        new_tickets = curr_tickets + count
+        self.lottery_col.update_one(
+            {"_id": "current"},
+            {
+                "$inc": {"pot": total_cost},
+                "$set": {f"tickets.{uid}": new_tickets}
+            }
+        )
+        
+        updated_state = self.get_lottery_state()
+        total_tix = sum(updated_state.get("tickets", {}).values())
+        return {
+            "ok": True,
+            "msg": f"🎟️ Purchased **{count} ticket(s)** for **{total_cost} coins**!\nTotal Tickets Owned: **{new_tickets}/10** | Current Pot: **{updated_state['pot']} coins** ({total_tix} tickets sold)"
+        }
+
+    def check_and_draw_lottery(self) -> dict:
+        state = self.get_lottery_state()
+        now = time.time()
+        last_draw = state.get("last_draw", now)
+        
+        if now - last_draw < 24 * 3600:
+            return {"drawn": False}
+
+        tickets_dict = state.get("tickets", {})
+        total_tickets_count = sum(tickets_dict.values())
+        
+        if total_tickets_count < 3:
+            # Carry over pot
+            self.lottery_col.update_one({"_id": "current"}, {"$set": {"last_draw": now}})
+            return {
+                "drawn": True,
+                "winner": None,
+                "msg": f"🎟️ **LOTTERY DRAW DELAYED!** Less than 3 tickets sold. Pot of **{state['pot']} coins** carries over to next draw! 🚀"
+            }
+
+        # Select winner
+        pool = []
+        for tuid, cnt in tickets_dict.items():
+            pool.extend([tuid] * cnt)
+            
+        winner_uid = random.choice(pool)
+        winner_user = self._get(winner_uid)
+        
+        pot = state.get("pot", 0)
+        payout = int(pot * 0.70)
+        burned = pot - payout
+        
+        self.users.update_one({"_id": winner_uid}, {"$inc": {"balance": payout}})
+        
+        # Reset lottery
+        self.lottery_col.update_one(
+            {"_id": "current"},
+            {
+                "$set": {
+                    "pot": 0,
+                    "tickets": {},
+                    "last_draw": now
+                }
+            }
+        )
+        
+        return {
+            "drawn": True,
+            "winner": winner_user.get("username", "Unknown"),
+            "payout": payout,
+            "burned": burned,
+            "msg": f"🎉 **LOTTERY DRAW RESULT!**\n👑 Winner: @{winner_user.get('username', 'Unknown')}\n💰 Jackpot Payout: **+{payout} coins** (70% of pot)\n🔥 Syndicate Burn: **{burned} coins** deleted!"
+        }
+
+    # --- CASINO SLOTS ---
+    def play_slots(self, uid: str, bet: int) -> dict:
+        uid = str(uid)
+        user = self._get(uid)
+        now = time.time()
+        
+        if now - user.get("last_slots", 0.0) < 5 and not self.is_creator(user.get("username")):
+            return {"ok": False, "msg": "⏳ Slot machine is spinning! Wait 5 seconds between spins."}
+        
+        if bet < 100 or bet > 5000:
+            return {"ok": False, "msg": "❌ Bet limit for Slots: Minimum 100, Maximum 5,000 coins!"}
+
+        if user["balance"] < bet and not self.is_creator(user.get("username")):
+            return {"ok": False, "msg": "❌ You don't have enough cash in hand for this bet!"}
+
+        self.users.update_one({"_id": uid}, {"$set": {"last_slots": now}})
+        
+        emojis = ["💎", "7️⃣", "🔔", "🍒", "🍋", "🍇"]
+        is_owner = self.is_creator(user.get("username"))
+        is_vip = self.is_vip(user.get("username"))
+
+        if is_owner:
+            outcome = ["💎", "💎", "💎"]
+        elif is_vip and random.random() < 0.40:
+            s = random.choice(["💎", "7️⃣", "🔔"])
+            outcome = [s, s, s]
+        else:
+            # 5-8% house edge probability distribution
+            roll = random.random()
+            if roll < 0.015:  # 1.5% jackpot
+                outcome = ["💎", "💎", "💎"]
+            elif roll < 0.08:   # 6.5% triple matching non-diamond
+                s = random.choice(["7️⃣", "🔔", "🍒"])
+                outcome = [s, s, s]
+            elif roll < 0.38:   # 30% double matching
+                s = random.choice(emojis)
+                other = random.choice([e for e in emojis if e != s])
+                res = [s, s, other]
+                random.shuffle(res)
+                outcome = res
+            else:
+                outcome = random.sample(emojis, 3)
+
+        reel_str = f"[ {outcome[0]} | {outcome[1]} | {outcome[2]} ]"
+
+        if outcome[0] == outcome[1] == outcome[2]:
+            if outcome[0] == "💎":
+                multiplier = 50
+                title = "💎💎💎 TRIPLE DIAMOND JACKPOT!"
+            else:
+                multiplier = 10
+                title = "🎉 TRIPLE MATCH!"
+            
+            payout = bet * multiplier
+            earned_info = self.apply_debt_garnishment(uid, payout)
+            self.users.update_one({"_id": uid}, {"$inc": {"wins": 1}})
+            return {
+                "ok": True,
+                "msg": f"🎰 **SLOTS:** {reel_str}\n🔥 **{title}** You won **+{payout} coins**! *(Debt paid: {earned_info['garnished']})* Cash: **{earned_info['new_balance']}**"
+            }
+        elif outcome[0] == outcome[1] or outcome[1] == outcome[2] or outcome[0] == outcome[2]:
+            multiplier = 2
+            payout = bet * multiplier
+            earned_info = self.apply_debt_garnishment(uid, payout)
+            self.users.update_one({"_id": uid}, {"$inc": {"wins": 1}})
+            return {
+                "ok": True,
+                "msg": f"🎰 **SLOTS:** {reel_str}\n✨ **DOUBLE MATCH!** You won **+{payout} coins**! *(Debt paid: {earned_info['garnished']})* Cash: **{earned_info['new_balance']}**"
+            }
+        else:
+            actual_loss = 0 if is_owner else bet
+            self.users.update_one({"_id": uid}, {"$inc": {"balance": -actual_loss, "losses": 1}})
+            updated_u = self.get_user(uid)
+            return {
+                "ok": True,
+                "msg": f"🎰 **SLOTS:** {reel_str}\n💀 **NO MATCH!** Lost **-{actual_loss} coins**. Cash: **{updated_u['balance']}**"
+            }
+
+    # --- LUXURY FLEX & COLLECTION ---
+    def buy_luxury(self, uid: str, item_key: str) -> dict:
+        item_key = item_key.lower().strip()
+        if item_key not in LUXURY_ITEMS:
+            return {"ok": False, "msg": "❌ Invalid luxury item key! Check `!luxury` catalog."}
+
+        item = LUXURY_ITEMS[item_key]
+        user = self._get(uid)
+        lux_list = user.get("luxuries", [])
+
+        if item_key in lux_list:
+            return {"ok": False, "msg": f"❌ You already own the **{item['name']}**!"}
+
+        cost = item["cost"]
+        if user["balance"] < cost and not self.is_creator(user.get("username")):
+            return {"ok": False, "msg": f"❌ You need **{cost} cash coins** to buy {item['name']}!"}
+
+        actual_cost = 0 if self.is_creator(user.get("username")) else cost
+        self.users.update_one(
+            {"_id": str(uid)},
+            {
+                "$inc": {"balance": -actual_cost},
+                "$push": {"luxuries": item_key}
+            }
+        )
+        return {
+            "ok": True,
+            "msg": f"💎 **LUXURY ACQUIRED!** Purchased **{item['name']}** for **{cost} coins**!\nUnlocked Status Title: *\"{item['title']}\"* ✨"
+        }
+
+    def flex_status(self, uid: str) -> dict:
+        user = self._get(uid)
+        lux_keys = user.get("luxuries", [])
+        
+        if not lux_keys:
+            return {"ok": False, "msg": "❌ You don't own any luxury items to flex! Type `!luxury` to browse the luxury catalog."}
+
+        emojis = [LUXURY_ITEMS[k]["emoji"] for k in lux_keys if k in LUXURY_ITEMS]
+        titles = [LUXURY_ITEMS[k]["title"] for k in lux_keys if k in LUXURY_ITEMS]
+        flex_icons = " ".join(emojis)
+        highest_title = titles[-1] if titles else "High Roller"
+
+        net_worth = user['balance'] + user['bank'] - user['debt']
+        return {
+            "ok": True,
+            "msg": f"💎 **FLEX STATUS:** @{user.get('username')}\n"
+                   f"👑 Title: *{highest_title}*\n"
+                   f"✨ Collection: {flex_icons}\n"
+                   f"💰 Net Worth: **{net_worth} coins**\n"
+                   f"🔥 *\"Flashing luxury items in the chat! Status: UNTOUCHABLE.\"*"
+        }
+
+    # --- BODYGUARD SECURITY ---
+    def buy_bodyguard(self, uid: str) -> dict:
+        user = self._get(uid)
+        now = time.time()
+        
+        if user.get("guard_expires", 0.0) > now:
+            left = int(user["guard_expires"] - now)
+            hrs = left // 3600
+            mins = (left % 3600) // 60
+            return {"ok": False, "msg": f"🛡️ You already have active Bodyguard security! ({hrs}h {mins}m left)"}
+
+        net_worth = max(0, user['balance'] + user['bank'] - user['debt'])
+        cost = max(2000, int(net_worth * 0.05))
+
+        if user["balance"] < cost and not self.is_creator(user.get("username")):
+            return {"ok": False, "msg": f"❌ Bodyguard security costs **{cost} cash coins** (5% net worth / min 2,000)!"}
+
+        actual_cost = 0 if self.is_creator(user.get("username")) else cost
+        expires_at = now + 24 * 3600
+        
+        self.users.update_one(
+            {"_id": str(uid)},
+            {
+                "$inc": {"balance": -actual_cost},
+                "$set": {"guard_expires": expires_at}
+            }
+        )
+        return {
+            "ok": True,
+            "msg": f"🛡️ **BODYGUARD HIRED!** Paid **{cost} coins** for 24-hour elite tactical security!\nAny player attempting to `!rob` or `!hunt` you will be neutralized! 🔫"
+        }
+
+    # --- BOUNTY CONTRACTS ---
+    def place_bounty(self, creator_uid: str, target_uname: str, amount: int) -> dict:
+        creator_uid = str(creator_uid)
+        creator = self._get(creator_uid)
+        
+        if amount < 1000:
+            return {"ok": False, "msg": "❌ Minimum bounty contract size is 1,000 coins!"}
+
+        target_uname = target_uname.lstrip("@").lower()
+        target_uid = self.find_uid(target_uname)
+        
+        if not target_uid or target_uid == creator_uid:
+            return {"ok": False, "msg": "❌ Target user invalid or not found!"}
+
+        if creator["balance"] < amount and not self.is_creator(creator.get("username")):
+            return {"ok": False, "msg": f"❌ You need **{amount} cash coins** to issue this bounty contract!"}
+
+        actual_cost = 0 if self.is_creator(creator.get("username")) else amount
+        fee = int(amount * 0.10)
+        escrow_reward = amount - fee
+
+        if actual_cost > 0:
+            self.users.update_one({"_id": creator_uid}, {"$inc": {"balance": -actual_cost}})
+
+        bounty_doc = {
+            "creator_uid": creator_uid,
+            "target_uid": target_uid,
+            "target_username": target_uname,
+            "total_escrow": escrow_reward,
+            "fee_burned": fee,
+            "created_at": time.time(),
+            "expires_at": time.time() + 48 * 3600,
+            "active": True
+        }
+        self.bounties_col.insert_one(bounty_doc)
+        
+        return {
+            "ok": True,
+            "msg": f"🎯 **BOUNTY CONTRACT ISSUED!**\nTarget: @{target_uname}\nReward Pool: **{escrow_reward} coins** *(10% Syndicate Fee Burned: {fee} coins)*\nValid for 48 hours!"
+        }
+
+    def claim_bounty_on_hit(self, attacker_uid: str, target_uid: str) -> str:
+        attacker_uid = str(attacker_uid)
+        target_uid = str(target_uid)
+        
+        bounties = list(self.bounties_col.find({"target_uid": target_uid, "active": True}))
+        if not bounties:
+            return ""
+
+        total_reward = 0
+        now = time.time()
+
+        for b in bounties:
+            if b.get("expires_at", 0) > now and b["creator_uid"] != attacker_uid:
+                total_reward += b["total_escrow"]
+                self.bounties_col.update_one({"_id": b["_id"]}, {"$set": {"active": False}})
+
+        if total_reward > 0:
+            self.users.update_one({"_id": attacker_uid}, {"$inc": {"balance": total_reward}})
+            return f"\n🎯 **BOUNTY CONTRACT CLAIMED!** Claimed **+{total_reward} escrow coins** for hitting target!"
+        return ""
+
+    def list_active_bounties(self) -> dict:
+        now = time.time()
+        bounties = list(self.bounties_col.find({"active": True}))
+        valid_bounties = [b for b in bounties if b.get("expires_at", 0) > now]
+
+        if not valid_bounties:
+            return {"ok": False, "msg": "🎯 No active bounty contracts found in the Syndicate network."}
+
+        text = "🎯 **ACTIVE SYNDICATE BOUNTIES**\n\n"
+        for b in valid_bounties[:10]:
+            target = b.get("target_username", "Unknown")
+            reward = b.get("total_escrow", 0)
+            hrs_left = int((b["expires_at"] - now) // 3600)
+            text += f"• @{target} — Reward: 💰 **{reward} coins** ({hrs_left}h left)\n"
+        
+        return {"ok": True, "msg": text}
+
+    # --- ADVANCED GANG UPGRADES ---
+    def upgrade_gang_level(self, uid: str) -> dict:
+        user = self._get(uid)
+        gang = self.get_user_gang(uid)
+        if not gang:
+            return {"ok": False, "msg": "❌ You are not in any gang!"}
+        if gang["boss_uid"] != str(uid):
+            return {"ok": False, "msg": "❌ Only the Gang Boss (Don) can upgrade Gang Level!"}
+
+        curr_lvl = gang.get("level", 1)
+        next_lvl = curr_lvl + 1
+        
+        if next_lvl not in GANG_LEVELS:
+            return {"ok": False, "msg": "❌ Gang is already at maximum level!"}
+
+        lvl_info = GANG_LEVELS[next_lvl]
+        cost = lvl_info["cost"]
+
+        if gang["vault"] < cost and not self.is_creator(user.get("username")):
+            return {"ok": False, "msg": f"❌ Gang Vault needs at least **{cost} vault coins** for Level {next_lvl} upgrade!"}
+
+        actual_cost = 0 if self.is_creator(user.get("username")) else cost
+        self.gangs.update_one(
+            {"_id": gang["_id"]},
+            {
+                "$inc": {"vault": -actual_cost},
+                "$set": {
+                    "level": next_lvl,
+                    "max_members": lvl_info["max_members"],
+                    "vault_cap": lvl_info["vault_cap"]
+                }
+            }
+        )
+        return {
+            "ok": True,
+            "msg": f"🏴 **GANG UPGRADED TO LEVEL {next_lvl}!**\n- Max Members: **{lvl_info['max_members']}**\n- Vault Cap: **{lvl_info['vault_cap']} coins**\n- New Perk: **{lvl_info['perk']}** 🔥"
+        }
+
+    def set_gang_flag(self, uid: str, flag_emoji: str) -> dict:
+        user = self._get(uid)
+        gang = self.get_user_gang(uid)
+        if not gang or gang["boss_uid"] != str(uid):
+            return {"ok": False, "msg": "❌ Only the Gang Boss can set the Gang Flag!"}
+
+        cost = 15000
+        if gang["vault"] < cost and not self.is_creator(user.get("username")):
+            return {"ok": False, "msg": f"❌ Gang Vault needs **{cost} coins** to buy custom Flag Emoji!"}
+
+        actual_cost = 0 if self.is_creator(user.get("username")) else cost
+        self.gangs.update_one(
+            {"_id": gang["_id"]},
+            {
+                "$inc": {"vault": -actual_cost},
+                "$set": {"flag": flag_emoji.strip()}
+            }
+        )
+        return {"ok": True, "msg": f"🚩 **GANG FLAG UPDATED!** Gang flag set to {flag_emoji.strip()} for **{cost} vault coins**!"}
+
+    def rename_gang(self, uid: str, new_name: str) -> dict:
+        user = self._get(uid)
+        gang = self.get_user_gang(uid)
+        if not gang or gang["boss_uid"] != str(uid):
+            return {"ok": False, "msg": "❌ Only the Gang Boss can rename the Gang!"}
+
+        clean_name = new_name.strip()
+        if self.gangs.find_one({"name_lower": clean_name.lower()}):
+            return {"ok": False, "msg": f"❌ Gang name '{clean_name}' is already taken!"}
+
+        cost = 20000
+        if gang["vault"] < cost and not self.is_creator(user.get("username")):
+            return {"ok": False, "msg": f"❌ Gang Vault needs **{cost} coins** to rename the Gang!"}
+
+        old_name = gang["name"]
+        actual_cost = 0 if self.is_creator(user.get("username")) else cost
+
+        self.gangs.update_one(
+            {"_id": gang["_id"]},
+            {
+                "$inc": {"vault": -actual_cost},
+                "$set": {"name": clean_name, "name_lower": clean_name.lower()}
+            }
+        )
+        self.users.update_many({"gang": old_name}, {"$set": {"gang": clean_name}})
+        self.territories.update_many({"owner_gang": old_name}, {"$set": {"owner_gang": clean_name}})
+
+        return {"ok": True, "msg": f"🏷️ **GANG RENAMED!** **{old_name}** is now officially **{clean_name}**!"}
+
     def create_gang(self, boss_uid: str, gang_name: str) -> dict:
         name_clean = gang_name.strip()
         if self.gangs.find_one({"name_lower": name_clean.lower()}):
@@ -310,6 +799,10 @@ class Database:
             "boss_uid": str(boss_uid),
             "members": [str(boss_uid)],
             "vault": 0,
+            "level": 1,
+            "max_members": 8,
+            "vault_cap": 50000,
+            "flag": "🏴",
             "invites": [],
             "applications": [],
             "active_vote": None,
@@ -425,8 +918,12 @@ class Database:
 
         rev = t["daily_revenue"]
         self.territories.update_one({"_id": key}, {"$set": {"last_collected": now}})
-        self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": rev}})
-        return {"ok": True, "msg": f"💰 **DISTRICT REVENUE COLLECTED!** Added **+{rev} coins** to **{gang['name']}** Vault from **{t['name']}**!"}
+        
+        # Enforce Gang Vault Cap
+        vault_cap = gang.get("vault_cap", 50000)
+        new_vault = min(gang["vault"] + rev, vault_cap)
+        self.gangs.update_one({"_id": gang["_id"]}, {"$set": {"vault": new_vault}})
+        return {"ok": True, "msg": f"💰 **DISTRICT REVENUE COLLECTED!** Added **+{rev} coins** to **{gang['name']}** Vault from **{t['name']}**! (Vault: {new_vault}/{vault_cap})"}
 
     def buy_business(self, uid: str, biz_key: str) -> dict:
         biz_key = biz_key.lower().strip()
@@ -506,7 +1003,9 @@ class Database:
                     gang_cut = int(income * cut_pct)
                     net_income = income - gang_cut
                     
-                    self.gangs.update_one({"_id": gang["_id"]}, {"$inc": {"vault": gang_cut}})
+                    vault_cap = gang.get("vault_cap", 50000)
+                    new_vault = min(gang["vault"] + gang_cut, vault_cap)
+                    self.gangs.update_one({"_id": gang["_id"]}, {"$set": {"vault": new_vault}})
                     gang_cut_total += gang_cut
                 else:
                     net_income = income
