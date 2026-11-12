@@ -116,13 +116,13 @@ class InstagramBot:
                             try:
                                 database_inst = db.db if hasattr(db, "db") else db.Database()
                                 
-                                # Auto IRS Audit Check (24h excess bank tax)
+                                # Auto IRS Audit Check
                                 tax_info = database_inst.check_and_apply_irs_tax(user_pk)
                                 if tax_info.get("audited"):
                                     self.reply(mock_msg, f"🏛️ **IRS AUDIT ALERT:** Deducted **-{tax_info['tax']} coins** (1.5% Wealth Tax) from @{uname}'s excess bank vault!")
                                     time.sleep(1)
 
-                                # Auto Lottery Draw Check (24h automated jackpot draw)
+                                # Auto Lottery Draw Check
                                 draw_info = database_inst.check_and_draw_lottery()
                                 if draw_info.get("drawn") and draw_info.get("msg"):
                                     self.reply(mock_msg, draw_info["msg"])
@@ -305,7 +305,6 @@ def cmd_rob(message, target=""):
         
     t_user = database_inst.get_user(target_uid)
     
-    # Bodyguard protection check
     if t_user.get("guard_expires", 0.0) > time.time():
         database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_rob": time.time()}})
         return bot.reply(message, f"🛡️ **ATTACK NEUTRALIZED!** @{target}'s Bodyguard intercepted your robbery attempt! Cooldown triggered.")
@@ -329,10 +328,7 @@ def cmd_rob(message, target=""):
         stolen = random.randint(30, min(300, t_user["balance"]))
         database_inst.users.update_one({"_id": str(target_uid)}, {"$inc": {"balance": -stolen}})
         earned_info = database_inst.apply_debt_garnishment(uid, stolen)
-        
-        # Check and claim bounty contract on successful hit
         bounty_msg = database_inst.claim_bounty_on_hit(uid, target_uid)
-        
         bot.reply(message, f"🥷 SUCCESSFUL HEIST! Looted **+{stolen} coins** from @{target}! *(Debt paid: {earned_info['garnished']})*{bounty_msg} 💰")
     else:
         fine = random.randint(50, 150)
@@ -356,7 +352,6 @@ def cmd_hunt(message, target=""):
         
     t_user = database_inst.get_user(target_uid)
     
-    # Bodyguard protection check
     if t_user.get("guard_expires", 0.0) > time.time():
         database_inst.users.update_one({"_id": str(uid)}, {"$set": {"last_hunt": time.time()}})
         return bot.reply(message, f"🛡️ **BOUNTY HUNT FAILED!** @{target}'s Bodyguard opened fire and repelled your attack!")
@@ -448,7 +443,7 @@ def cmd_work(message):
     
     cooldown = 1800
     left = cooldown - (time.time() - user.get("last_work", 0))
-    if left > 0 and not database_inst.is_creator(message.user.username):
+    if left > 0 and not database_inst.is_creator(user.get("username")):
         mins = int(left // 60)
         return bot.reply(message, f"⏳ You are too tired! Rest for another {mins} minutes.")
     
@@ -641,8 +636,6 @@ def cmd_buy(message, item_name="", *args):
     total_qty = inv[item['key']]
     bot.reply(message, f"🧪 Purchased **{item['name']}**! You now own {total_qty}.")
 
-# --- LOTTERY & CASINO SLOTS COMMANDS ---
-
 @bot.command("lottery")
 def cmd_lottery(message, action=None, count=1):
     uid = str(message.user.pk)
@@ -684,8 +677,6 @@ def cmd_slots(message, bet=100):
     res = database_inst.play_slots(uid, bet)
     bot.reply(message, res["msg"])
 
-# --- LUXURY FLEX COMMANDS ---
-
 @bot.command("luxury")
 def cmd_luxury(message):
     catalog_text = "💎 **SYNDICATE LUXURY & STATUS CATALOG**\n\n"
@@ -703,8 +694,6 @@ def cmd_flex(message):
     database_inst = db.db if hasattr(db, "db") else db.Database()
     res = database_inst.flex_status(uid)
     bot.reply(message, res["msg"])
-
-# --- BUSINESS & ENTERPRISE COMMANDS ---
 
 @bot.command("biz")
 def cmd_biz(message, action=None, *args):
@@ -776,8 +765,6 @@ def cmd_biz(message, action=None, *args):
 
     else:
         return bot.reply(message, "❌ Unknown action! Use `!biz catalog`, `!biz buy <key>`, `!biz list`, `!biz collect`, `!biz flip`, `!biz host`, or `!biz order`.")
-
-# --- GANG MECHANICS & EMPIRE COMMANDS ---
 
 @bot.command("gang")
 def cmd_gang(message, action=None, *args):
@@ -922,7 +909,6 @@ def cmd_gang(message, action=None, *args):
                 return bot.reply(message, f"❌ Gang **{invited_gang['name']}** is full ({max_m} max members)!")
 
             database_inst.remove_user_from_gang(uid)
-            
             database_inst.gangs.update_one({"_id": invited_gang["_id"]}, {"$pull": {"invites": uid}, "$addToSet": {"members": uid}})
             database_inst.users.update_one({"_id": uid}, {"$set": {"gang": invited_gang["name"]}})
             return bot.reply(message, f"🎉 You successfully joined gang **{invited_gang['name']}**!")
