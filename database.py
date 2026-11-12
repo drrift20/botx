@@ -79,6 +79,13 @@ class Database:
         
         self._migrate_legacy_json(legacy_path)
 
+    def close(self):
+        try:
+            self.client.close()
+            log.info("MongoDB client connection closed cleanly.")
+        except Exception as e:
+            log.error("Error closing MongoDB connection: %s", e)
+
     def _migrate_legacy_json(self, legacy_path: str):
         if os.path.exists(legacy_path):
             try:
@@ -919,7 +926,6 @@ class Database:
         rev = t["daily_revenue"]
         self.territories.update_one({"_id": key}, {"$set": {"last_collected": now}})
         
-        # Enforce Gang Vault Cap
         vault_cap = gang.get("vault_cap", 50000)
         new_vault = min(gang["vault"] + rev, vault_cap)
         self.gangs.update_one({"_id": gang["_id"]}, {"$set": {"vault": new_vault}})
@@ -1028,87 +1034,6 @@ class Database:
             report += f"\n💳 Loan Shark Debt Paid: **-{earned_info['garnished']} coins**"
 
         return {"ok": True, "msg": report}
-
-    def biz_property_flip(self, uid: str) -> dict:
-        uid = str(uid)
-        biz = self.businesses.find_one({"uid": uid, "biz_key": "realty"})
-        if not biz:
-            return {"ok": False, "msg": "❌ You must own a **Pawn Shop & Real Estate (`realty`)** business to flip properties!"}
-        
-        now = time.time()
-        if now - biz.get("last_event", 0.0) < 3600 and not self.is_creator(self.get_user(uid).get("username")):
-            return {"ok": False, "msg": "⏳ Property market is cooling down! Wait 1 hour between flips."}
-
-        self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
-        
-        user_name = self.get_user(uid).get("username", "")
-        if self.is_vip(user_name):
-            outcome = random.choices(["boom", "profit", "loss"], weights=[0.45, 0.45, 0.10])[0]
-        else:
-            outcome = random.choices(["boom", "profit", "loss"], weights=[0.25, 0.50, 0.25])[0]
-
-        if outcome == "boom":
-            payout = random.randint(5000, 12000)
-            earned = self.apply_debt_garnishment(uid, payout)
-            return {"ok": True, "msg": f"📈 **MARKET BOOM!** Sold luxury commercial plot for massive profit! Claimed **+{earned['net_earned']} coins**! 💎"}
-        elif outcome == "profit":
-            payout = random.randint(1500, 4000)
-            earned = self.apply_debt_garnishment(uid, payout)
-            return {"ok": True, "msg": f"🏡 **PROPERTY SOLD!** Flipped residential house successfully for **+{earned['net_earned']} coins**! 💵"}
-        else:
-            loss = random.randint(1000, 3000)
-            u = self.get_user(uid)
-            actual_loss = min(loss, u["balance"])
-            self.users.update_one({"_id": uid}, {"$inc": {"balance": -actual_loss}})
-            return {"ok": True, "msg": f"📉 **MARKET CRASH!** Property value dropped, took a loss of **-{actual_loss} coins**! 💀"}
-
-    def biz_host_vip_party(self, uid: str) -> dict:
-        uid = str(uid)
-        biz = self.businesses.find_one({"uid": uid, "biz_key": "club"})
-        if not biz:
-            return {"ok": False, "msg": "❌ You must own a **Nightclub / Lounge (`club`)** to host VIP parties!"}
-        
-        now = time.time()
-        if now - biz.get("last_event", 0.0) < 3600 and not self.is_creator(self.get_user(uid).get("username")):
-            return {"ok": False, "msg": "⏳ Nightclub is prepping for the next event! Wait 1 hour."}
-
-        self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
-        
-        user_name = self.get_user(uid).get("username", "")
-        win_rate = 0.85 if self.is_vip(user_name) else 0.70
-
-        if random.random() < win_rate:
-            payout = random.randint(1200, 3500)
-            earned = self.apply_debt_garnishment(uid, payout)
-            return {"ok": True, "msg": f"🍸 **VIP GALA SUCCESS!** Packed nightclub with celebrities and high-rollers! Earned **+{earned['net_earned']} coins** from door entries & bar tabs! 🎉"}
-        else:
-            fine = random.randint(500, 1500)
-            u = self.get_user(uid)
-            actual_fine = min(fine, u["balance"])
-            self.users.update_one({"_id": uid}, {"$inc": {"balance": -actual_fine}})
-            return {"ok": True, "msg": f"🚨 **POLICE RAID!** Noise complaint resulted in a fine of **-{actual_fine} coins**! 🚓"}
-
-    def biz_chop_order(self, uid: str) -> dict:
-        uid = str(uid)
-        biz = self.businesses.find_one({"uid": uid, "biz_key": "chop_shop"})
-        if not biz:
-            return {"ok": False, "msg": "❌ You must own a **Luxury Chop Shop (`chop_shop`)** to fulfill custom vehicle orders!"}
-        
-        now = time.time()
-        if now - biz.get("last_event", 0.0) < 3600 and not self.is_creator(self.get_user(uid).get("username")):
-            return {"ok": False, "msg": "⏳ Chop shop mechanics are busy! Wait 1 hour."}
-
-        self.businesses.update_one({"_id": biz["_id"]}, {"$set": {"last_event": now}})
-        
-        user_name = self.get_user(uid).get("username", "")
-        win_rate = 0.85 if self.is_vip(user_name) else 0.65
-
-        if random.random() < win_rate:
-            payout = random.randint(2500, 6000)
-            earned = self.apply_debt_garnishment(uid, payout)
-            return {"ok": True, "msg": f"🚗 **ORDER FULFILLED!** Dismantled and shipped rare imported sports car parts. Payout: **+{earned['net_earned']} coins**! 🔥"}
-        else:
-            return {"ok": True, "msg": f"⚠️ **PARTS SHORTAGE!** Client canceled the custom order. No profit made this time."}
 
 
 db = Database()
