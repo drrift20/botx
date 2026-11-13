@@ -5,8 +5,9 @@ MongoDB-backed persistent store for Instagram Economy Bot.
 - Invisible creator perks support (Username: v.stray_).
 - Special VIP Boosted Luck support (Username: _nuhash_s).
 - Integrated Anti-Exploit Debt Garnishment, Dynamic Loans, Gang Empire & Interactive Business Mechanics.
-- Phase 1 Additions: Automated Daily Lottery, Casino Slots, Luxury Items Collection & Flex System,
-  Bodyguard Security, Escrow Bounty Contracts, Automatic IRS Wealth Tax, and Advanced Gang Upgrades.
+- Phase 1 & Phase 2 Additions: Police Force, Arrests & Bribes, Wanted Level & Bounties,
+  Blood Pacts & Betrayal, Extortion, Smuggling, PVP Duels, Street Brawls, Robin Hood Welfare,
+  Business Liquidation & Gang Transfer.
 """
 import json
 import logging
@@ -126,6 +127,9 @@ class Database:
                 "last_rob": 0.0,
                 "last_hunt": 0.0,
                 "last_slots": 0.0,
+                "heat_until": 0.0,
+                "is_police": False,
+                "blood_partner": None,
                 "streak": 0,
                 "wins": 0,
                 "losses": 0,
@@ -151,6 +155,15 @@ class Database:
             if "last_slots" not in u:
                 fields_to_set["last_slots"] = 0.0
                 u["last_slots"] = 0.0
+            if "heat_until" not in u:
+                fields_to_set["heat_until"] = 0.0
+                u["heat_until"] = 0.0
+            if "is_police" not in u:
+                fields_to_set["is_police"] = False
+                u["is_police"] = False
+            if "blood_partner" not in u:
+                fields_to_set["blood_partner"] = None
+                u["blood_partner"] = None
             if fields_to_set:
                 self.users.update_one({"_id": uid}, {"$set": fields_to_set})
             
@@ -189,7 +202,7 @@ class Database:
             bank_bal = u.get("bank", 0)
             if bank_bal > 50000 and not self.is_creator(u.get("username")):
                 excess = bank_bal - 50000
-                tax = int(excess * 0.015)
+                tax = int(excess * 0.005)  # 0.5% Robin Hood tax
                 if tax > 0:
                     new_bank = bank_bal - tax
                     self.users.update_one({"_id": str(uid)}, {"$set": {"bank": new_bank}})
@@ -270,7 +283,7 @@ class Database:
         self.users.update_one(
             {"_id": str(uid)},
             {
-                "$set": {"last_rob": time.time()},
+                "$set": {"last_rob": time.time(), "heat_until": time.time() + 900}, # 15 min heat
                 "$inc": {field: 1}
             }
         )
@@ -354,6 +367,106 @@ class Database:
             "total_debt": total_debt_with_juice
         }
 
+    # --- POLICE FORCE & LAW ENFORCEMENT ---
+    def join_police(self, uid: str) -> dict:
+        uid = str(uid)
+        u = self._get(uid)
+        if u.get("is_police"):
+            return {"ok": False, "msg": "👮 You are already a member of the Police Force!"}
+        if u.get("gang"):
+            return {"ok": False, "msg": "❌ You cannot join the Police while you are in a Gang! Leave gang first."}
+        
+        # Check active bounty
+        now = time.time()
+        has_bounty = self.bounties_col.find_one({"target_uid": uid, "active": True, "expires_at": {"$gt": now}})
+        if has_bounty:
+            return {"ok": False, "msg": "❌ You have an active Syndicate Bounty on your head! Clear it before joining law enforcement."}
+
+        # Check black market businesses
+        bm_biz = self.businesses.find_one({"uid": uid, "type": "black"})
+        if bm_biz:
+            return {"ok": False, "msg": "❌ You own black market businesses! Use `!biz close <key>` to dismantle them before joining Police."}
+
+        self.users.update_one({"_id": uid}, {"$set": {"is_police": True}})
+        return {"ok": True, "msg": "👮 **WELCOME TO THE FORCE!** You are now an official Police Officer. Uphold the law and clean up the streets!"}
+
+    def arrest_user(self, cop_uid: str, target_uname: str) -> dict:
+        cop_uid = str(cop_uid)
+        cop = self._get(cop_uid)
+        if not cop.get("is_police"):
+            return {"ok": False, "msg": "❌ Only official Police Officers can execute arrests (`!police join`)!"}
+
+        target_uname = target_uname.lstrip("@").lower()
+        target_uid = self.find_uid(target_uname)
+        if not target_uid or target_uid == cop_uid:
+            return {"ok": False, "msg": "❌ Target user invalid or not found!"}
+
+        target = self._get(target_uid)
+        now = time.time()
+        
+        # Check if target has active heat or bounty
+        has_heat = target.get("heat_until", 0.0) > now
+        has_bounty = self.bounties_col.find_one({"target_uid": target_uid, "active": True, "expires_at": {"$gt": now}})
+
+        if not has_heat and not has_bounty:
+            return {"ok": False, "msg": f"❌ @{target_uname} has no active Heat timer or Wanted Bounty! You cannot arrest an innocent citizen."}
+
+        fine = int(target["balance"] * 0.30)
+        commission = int(fine * 0.50)
+        burned = fine - commission
+
+        self.users.update_one({"_id": target_uid}, {"$inc": {"balance": -fine}, "$set": {"heat_until": 0.0}})
+        self.users.update_one({"_id": cop_uid}, {"$inc": {"balance": commission}})
+
+        # Clear bounty if any
+        if has_bounty:
+            self.bounties_col.update_many({"target_uid": target_uid, "active": True}, {"$set": {"active": False}})
+
+        return {"ok": True, "msg": f"🚨 **ARREST SUCCESSFUL!** Officer @{cop.get('username')} busted @{target_uname}!\nSeized fine: **{fine} coins** *(Police Commission: +{commission} coins | Burned: {burned} coins)* 🚓🔥"}
+
+    def bribe_cop(self, uid: str, amount: int) -> dict:
+        uid = str(uid)
+        u = self._get(uid)
+        if u.get("balance") < amount:
+            return {"ok": False, "msg": "❌ You don't have enough cash in hand to offer this bribe!"}
+
+        if amount < 500:
+            return {"ok": False, "msg": "❌ Minimum bribe amount is 500 coins!"}
+
+        # Clear heat
+        self.users.update_one({"_id": uid}, {"$inc": {"balance": -amount}, "$set": {"heat_until": 0.0}})
+        return {"ok": True, "msg": f"🤝 **BRIBE ACCEPTED!** You slipped **{amount} coins** to the officer. Case dismissed, heat cleared! 🕶️"}
+
+    # --- LIQUIDATING / CLOSING BUSINESSES ---
+    def close_business(self, uid: str, biz_key: str) -> dict:
+        uid = str(uid)
+        biz_key = biz_key.lower().strip()
+        biz = self.businesses.find_one({"uid": uid, "biz_key": biz_key})
+        if not biz:
+            return {"ok": False, "msg": f"❌ You do not own business key `{biz_key}`!"}
+
+        binfo = BUSINESSES.get(biz_key, {})
+        refund = int(binfo.get("cost", 10000) * 0.40) # 40% refund
+
+        self.businesses.delete_one({"_id": biz["_id"]})
+        self.users.update_one({"_id": uid}, {"$inc": {"balance": refund}})
+        return {"ok": True, "msg": f"🏗️ **BUSINESS DISMANTLED!** Closed **{binfo.get('name', biz_key)}** and received **+{refund} coins** liquidation refund. Illict ties cleared!"}
+
+    # --- GANG TRANSFER ---
+    def transfer_gang(self, uid: str, target_uname: str) -> dict:
+        uid = str(uid)
+        gang = self.get_user_gang(uid)
+        if not gang or gang["boss_uid"] != uid:
+            return {"ok": False, "msg": "❌ Only the Gang Boss (Don) can transfer leadership!"}
+
+        target_uname = target_uname.lstrip("@").lower()
+        target_uid = self.find_uid(target_uname)
+        if not target_uid or target_uid not in gang["members"]:
+            return {"ok": False, "msg": f"❌ Target @{target_uname} must be an active member of your gang!"}
+
+        self.gangs.update_one({"_id": gang["_id"]}, {"$set": {"boss_uid": target_uid}})
+        return {"ok": True, "msg": f"👑 **GANG LEADERSHIP TRANSFERRED!** Don status of **{gang['name']}** successfully passed to @{target_uname}!"}
+
     # --- LOTTERY SYSTEM ---
     def get_lottery_state(self) -> dict:
         state = self.lottery_col.find_one({"_id": "current"})
@@ -361,7 +474,7 @@ class Database:
             state = {
                 "_id": "current",
                 "pot": 0,
-                "tickets": {},  # uid_str -> count
+                "tickets": {},
                 "last_draw": time.time()
             }
             self.lottery_col.insert_one(state)
@@ -417,7 +530,6 @@ class Database:
         total_tickets_count = sum(tickets_dict.values())
         
         if total_tickets_count < 3:
-            # Carry over pot
             self.lottery_col.update_one({"_id": "current"}, {"$set": {"last_draw": now}})
             return {
                 "drawn": True,
@@ -425,7 +537,6 @@ class Database:
                 "msg": f"🎟️ **LOTTERY DRAW DELAYED!** Less than 3 tickets sold. Pot of **{state['pot']} coins** carries over to next draw! 🚀"
             }
 
-        # Select winner
         pool = []
         for tuid, cnt in tickets_dict.items():
             pool.extend([tuid] * cnt)
@@ -439,7 +550,6 @@ class Database:
         
         self.users.update_one({"_id": winner_uid}, {"$inc": {"balance": payout}})
         
-        # Reset lottery
         self.lottery_col.update_one(
             {"_id": "current"},
             {
@@ -1034,7 +1144,6 @@ class Database:
 
         return {"ok": True, "msg": report}
 
-    # --- INTERACTIVE BUSINESS ACTIONS (FLIP, HOST, ORDER) ---
     def biz_property_flip(self, uid: str) -> dict:
         uid = str(uid)
         biz = self.businesses.find_one({"uid": uid, "biz_key": "realty"})
